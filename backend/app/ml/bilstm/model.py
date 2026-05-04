@@ -25,8 +25,8 @@ from tensorflow.keras.regularizers import l2
 
 class Config:
     # Vocabulary & sequence
-    VOCAB_SIZE    = 15000   # top N words to keep
-    MAX_LEN       = 128     # max token length per ticket description
+    VOCAB_SIZE     = 3000   # top N words to keep
+    MAX_LEN       = 50     # max token length per ticket description
     OOV_TOKEN     = "<OOV>" # out-of-vocabulary token
 
     # Embedding

@@ -1,0 +1,409 @@
+text,complexity
+User is not receiving calendar invites from external senders,moderate
+Some users are seeing a different version of the company homepage than others. Cache clearing doesn't fix it. CDN config hasn't changed.,moderate
+User's home directory is full and they can't save any new files,simple
+user roles behaving incorrectly across modules complex mapping issue,complex
+server slow response though cpu low maybe io or thread blocking,complex
+"After a storage volume expansion, a database that was restored to that volume shows correct data for most tables but two tables appear stuck at a snapshot from two days prior.",complex
+"After a SAN controller replacement, one application's write performance degraded by 60% while reads remain normal. Other applications on the same SAN are unaffected. I/O metrics at the SAN level show no bottleneck.",complex
+cannot copy paste,simple
+excel formulas not calculating automatically,moderate
+An API integration between the CRM and billing system stopped syncing customer records. No errors appear in either system's logs and the API credentials are valid.,complex
+User needs the time zone on their laptop changed to GMT,simple
+sync not updating changes immediately,moderate
+VoIP call quality is fine for the first few minutes then becomes choppy. Happens on all calls regardless of who they're with.,moderate
+Video plays fine on YouTube but stutters on the internal training portal,moderate
+Incoming faxes stopped arriving after the office phone system was updated. Outgoing faxes work.,moderate
+One user's Teams status always shows as 'Away' even when they're actively using the computer,moderate
+Database query runs in 2 seconds in the dev environment but takes over 4 minutes in production. Table sizes and indexes are identical. Execution plans differ between environments.,complex
+distributed services giving inconsistent results timing sync issue,complex
+Corporate mobile device is not receiving SMS verification codes for two-factor authentication,moderate
+User needs a recurring daily reminder set in Outlook,simple
+data inconsistency between two systems after sync maybe timing or api issue,complex
+One specific meeting room's video display shows a blurry image when connected via HDMI but is sharp over USB-C,simple
+User's right-click context menu takes 10 seconds to appear,moderate
+User's Outlook search returns no results for emails older than 3 months,moderate
+One user's Teams messages are being delivered with a 10 to 15 minute delay. Real-time for everyone else.,moderate
+"After a storage tier migration, a reporting tool started pulling data noticeably slower. The data volume hasn't changed and the network path is the same. Storage latency metrics look normal at the array level but elevated at the host level.",complex
+User needs an old archived email thread retrieved from backup,simple
+"A department-wide license activation for Adobe Acrobat failed silently. Some machines activated, others didn't. No error logs were generated. The activation server shows all seats as claimed.",complex
+Projector in the main conference room doesn't switch inputs automatically when a laptop is connected,simple
+User's screen is rotated sideways,simple
+User's local admin rights were accidentally removed. Needs them restored.,simple
+A file server migration completed but three users consistently get disconnected from their mapped drives every 45 minutes. All other users are stable. Affected users span different departments and floors.,complex
+"After a scheduled maintenance window, an internal API gateway started rejecting requests from one upstream service but accepting identical requests from two others. Auth tokens, headers, and payload formats are the same across all three.",complex
+Colleague's name is spelled wrong in the company directory,simple
+User needs a USB-C to HDMI adapter,simple
+"After a recent Active Directory password policy change, users in one branch office are being locked out after one failed attempt instead of the configured five.",complex
+An internal API that returns employee data started returning records with fields in a different order than documented. Downstream systems parsing by position are breaking.,complex
+A log aggregation pipeline started dropping around 3% of log entries from one server. The server is generating logs correctly and the network path shows no packet loss. Dropped entries follow no identifiable pattern.,complex
+User's second monitor stopped being detected after they moved to a new desk,simple
+An on-premise application that uses LDAP authentication started failing for users in a specific OU after an AD schema update. Users outside that OU authenticate fine.,complex
+User needs a column added to a shared Excel tracker on the team drive,simple
+User needs a software license transferred from their old laptop to their new one,simple
+usb slow transfer,simple
+User's OneDrive is syncing but only uploading files smaller than 50MB. Larger files stay queued indefinitely with no error shown.,moderate
+Antivirus quarantined a file that the user needs for their work. They are sure it is safe.,simple
+User cannot drag and drop files between two open Explorer windows,moderate
+cache inconsistency between environments stale responses,complex
+User is getting duplicate calendar invites for every meeting,moderate
+Wireless mouse lag is noticeable only during video calls,simple
+User needs auto-correct turned off in Word,simple
+Printer on the 3rd floor is out of paper,simple
+"After deploying a new GPO, machines in one site are applying it correctly, but machines at a remote site connected via VPN are only applying it inconsistently, with no errors in the GP event log",complex
+User needs the font in their Outlook reading pane made larger,simple
+Remote worker's laptop shows connected to VPN but mapped drives aren't accessible. Pinging the file server by IP works but by hostname fails.,moderate
+User needs read-only access to a shared project folder,simple
+User's laptop lid close action isn't triggering sleep mode anymore,simple
+keyboard not typing,simple
+User wants to know how to set an out-of-office reply,simple
+A cloud-based HR portal works on all browsers on office machines but fails to load the login page on remote machines going through the corporate proxy,moderate
+Wi-Fi signal is weak at one end of the open office. All other areas have full signal.,simple
+"Payroll software is accessible to all staff but one manager's account can view records but cannot approve them, despite having the correct role assigned",moderate
+file sync conflict creating duplicates,moderate
+User's number pad isn't working even though Num Lock is on,simple
+A user's machine is showing a software update as available but when they try to install it the progress bar completes and then the same update reappears as available,moderate
+Outlook is opening in safe mode every time it's launched,moderate
+A software deployment package installs silently on 90% of machines in the fleet but fails on a consistent subset with no logged errors. Affected machines show no obvious configuration differences.,complex
+User accidentally archived their entire inbox and needs it restored,simple
+User changed their laptop and now their authenticator app codes don't match,simple
+"After a DNS server change, internal hostnames resolve correctly from the office but not for remote users even after flushing DNS cache on their machines",complex
+User cannot change their profile picture in Teams,simple
+User's laptop camera works in Device Manager but shows a black screen in every app,moderate
+User's work phone is not ringing for incoming calls but voicemails are being left,moderate
+"After a billing system update, invoices are generating with correct line items but the total field shows zero for any invoice containing a discount code.",complex
+A database migration script ran successfully but post-migration reports show totals that differ from pre-migration snapshots by small inconsistent amounts,complex
+Helpdesk line is getting echo on every call placed from the third floor. Only outbound calls are affected. Inbound calls are clear.,moderate
+User needs Bluetooth turned on for their desktop machine that doesn't have a Bluetooth adapter,simple
+User's phone calendar isn't syncing with Outlook after they got a new SIM card,moderate
+intermittent api timeout only under load needs deep debugging,complex
+browser freezing randomly no clear steps,moderate
+Windows update is stuck at 35% for over two hours,moderate
+Application hangs only when two specific users are logged into the same terminal server session simultaneously. Works fine individually.,complex
+"After a cloud storage quota increase, upload speeds for large files dropped significantly for all users. Small files upload at normal speed.",complex
+Laptop keyboard works normally except the spacebar requires a hard press to register,simple
+Laptop battery percentage jumps from 40% to 5% without warning then shuts down,moderate
+User wants caps lock disabled permanently,simple
+remote login slow but local works fine,moderate
+Internal video streaming platform buffers constantly for remote workers but plays fine on-site,moderate
+User's Excel file opens as read-only even when no one else has it open,moderate
+file rename not working,simple
+Keyboard backlight stopped working after a driver update,simple
+A department's automated invoicing system sends emails correctly on weekdays but consistently fails to deliver on weekends. The mail server is running and other weekend jobs succeed.,complex
+Webcam light turns on but video feed is black in all apps,moderate
+"After enabling IPv6 on the internal network, DNS resolution broke for a subset of devices. IPv4-only devices are unaffected. Devices with both stacks resolve some names but not others, with no consistent pattern.",complex
+User needs the Zoom app updated to the latest version,simple
+User wants spell check enabled in Outlook,simple
+New monitor arrived but the stand is broken. Needs replacement.,simple
+User's laptop is connected to the dock but the ethernet through the dock isn't working,moderate
+User's Windows clock is showing the wrong time even after syncing with the time server,moderate
+Shared mailbox is accessible in OWA but won't open in Outlook desktop for one specific user,moderate
+User wants a shortcut to the shared drive placed on their desktop,simple
+User wants the autocorrect shortcut for their company name set up in Word,simple
+screen dim suddenly,simple
+A web-based internal tool works in Internet Explorer but throws JavaScript errors in Chrome and Edge. Switching browser isn't an option due to business requirements.,complex
+"After migrating to a new ERP system, reports that used to generate in seconds now take over 10 minutes. Happens for all users. Database team says queries look fine on their end.",complex
+A scheduled task that sends automated reports via email is running but recipients aren't getting the emails. No errors in the task scheduler logs.,complex
+"After a domain rename, machines that were not re-joined to the domain are showing trust relationship errors. Re-joining fixes it, but three machines can't be rejoined remotely and are in inaccessible locations.",complex
+User cannot log into their laptop after a Windows update was applied last night. They've tried their usual password and the PIN but neither works. IT had pushed a policy update around the same time.,moderate
+"After a Citrix upgrade, users in one AD group can launch published apps normally but their session disconnects the moment they try to open a file from a network share within the app. Users in all other groups are unaffected.",complex
+SSL certificate expired on the internal ticketing system. Users are seeing browser warnings.,moderate
+Mouse cursor disappears on second monitor only,simple
+headphone jack loose,simple
+"After a network firewall upgrade, traffic between two internal subnets that had always communicated freely started being blocked. No rules explicitly deny the traffic and allow rules appear to be in place.",complex
+"HDMI to projector connection works on one laptop but not another, using the same cable",moderate
+User's machine is prompting to activate Windows even though it was activated last month,moderate
+VPN connects successfully but after about 20 minutes drops without warning. User has to reconnect manually. Happens on both Wi-Fi and wired connection. Didn't happen before last month's firmware update on the router.,complex
+system fan loud randomly even idle,moderate
+Laptop power button needs to be held down for 10 seconds before the machine turns on,moderate
+email sync delayed sometimes works later,moderate
+User needs their display resolution changed to 1920x1080,simple
+"After switching the office to a new DHCP server, some printers stopped responding to print jobs despite showing as online. Assigning static IPs to affected printers resolved it for most but two remain unresponsive.",complex
+User spilled coffee near the laptop but it appears to be working. Wants it checked.,simple
+User can't right-click on their desktop,simple
+User's work laptop doesn't detect AirPods as an audio device,simple
+User changed their password but is still being prompted for the old one on their mobile device,simple
+User needs a distribution list created for the new project team,simple
+User's Outlook keeps asking them to accept the license agreement every time it opens,simple
+A CRON job running on a Linux server executes on schedule but the output file timestamp never updates. The job itself has no errors in the log.,complex
+Laptop screen brightness won't go below 50% using the keyboard shortcut,simple
+Three users in the finance department are getting 'Access Denied' when opening shared Excel files on the network drive. Two other users on the same team can open the files fine. This started after a folder restructure done by the admin last Friday.,complex
+cannot open folder,simple
+"After rotating API keys for a data pipeline, two downstream jobs resumed normally but a third started writing null values to every field except the primary key. The new key has identical permissions to the old one.",complex
+Laptop won't detect the wireless network at a client's office but connects to all other Wi-Fi networks,moderate
+"After a bulk licence reassignment, half the affected users lost access to one specific Office app. The licence portal shows it as assigned for all users.",complex
+"After restoring a VM from snapshot, the application it hosts authenticates users correctly but session data resets every 10 minutes. The session timeout is configured for 8 hours.",complex
+File sync client is stuck at 99% and won't complete. Restarting the app doesn't help.,moderate
+User needs read access to a specific project folder they've been added to,simple
+User locked out of their account after too many failed password attempts,simple
+random kernel crashes with no dump files hard to diagnose hardware or driver,complex
+"After a tenant-level Teams policy update, meeting recordings stopped saving to SharePoint for one department. Other departments are unaffected and no department-level policy was changed.",complex
+Remote users on one specific ISP can't reach the corporate web portal. All other ISPs work fine. The portal is cloud-hosted.,complex
+speaker making noise,simple
+"After deploying an updated SSL certificate to a load balancer, mobile app users started getting connection errors. Browser-based users on the same endpoints are unaffected. The cert chain is complete.",complex
+"After replacing a network switch, IP phones on that segment register with the PBX but drop all calls after exactly 60 seconds",complex
+touchpad lagging,simple
+"After a storage migration, some users can open files normally while others see old cached versions. Clearing cache didn't fix it for everyone.",complex
+User's authenticator app shows codes that don't work when logging into the company portal. Works fine for personal accounts on the same app.,moderate
+Laptop HDMI port works with one monitor but not another,moderate
+"Intermittent login failures on a shared kiosk machine. Sometimes it logs in fine, sometimes it freezes at the loading screen. No error message shown. Event logs show conflicting entries from two different GPOs being applied.",complex
+Wi-Fi keeps disconnecting every hour on one specific floor of the building. Wired connections are stable. Other floors are unaffected.,moderate
+network spikes during uploads,moderate
+User needs a new Teams channel created for their project,simple
+A shared drive folder that was working fine yesterday now shows as empty for all users. Files are visible when accessed directly via the server console.,complex
+battery icon missing,simple
+A scheduled PowerShell script that archives old files started moving files that don't meet the age criteria. The logic hasn't changed and the server clock is correct.,complex
+User's desktop background is stretching incorrectly across dual monitors,simple
+A web form used for internal requests submits successfully and shows a confirmation page but the submission never appears in the backend database. Error logs are empty.,complex
+Mouse scroll wheel not working,simple
+A network-attached storage device shows as connected but its shares can't be accessed from any machine,moderate
+Laptop trackpad sensitivity is too high and needs adjusting,simple
+A load balancer distributing traffic across three app servers started routing all sessions to one server only. Health checks show all three as healthy.,complex
+"After a domain controller failover test, three service accounts stopped authenticating. Reverting to the primary DC restored two of them but the third still fails.",complex
+Laptop takes much longer to shut down than usual,moderate
+role based access failing in nested modules complicated hierarchy,complex
+Monitor goes black for two seconds every 30 minutes then comes back on,moderate
+background job failing silently no alerts configured,complex
+User wants their email signature updated with a new phone number,simple
+Keyboard shortcut for copy and paste stopped working in one specific application only,simple
+User can receive Teams calls but cannot make outbound calls to external numbers,moderate
+system not shutting down,simple
+data mismatch across reports after migration maybe schema or transform issue,complex
+User needs their account unlocked,simple
+User's work laptop connects to home Wi-Fi but shows no internet access,moderate
+printer connected but prints wrong format,moderate
+Two servers running the same application version return different responses to identical API requests. Config files appear identical but response discrepancy is consistent and reproducible.,complex
+User needs a monitor stand raised. Current one isn't adjustable.,simple
+A SaaS platform used by the sales team started logging users out mid-session. Only users authenticating via SSO are affected. Users with local accounts stay logged in.,complex
+User moved to a hot desk and needs their mapped printers updated,simple
+cloud sync duplicates files sometimes,moderate
+User's webcam resolution looks low in Teams but appears fine in the camera settings app,moderate
+software crash after login sometimes not always,moderate
+User can access the internet but internal sites time out. DNS resolves internal names correctly but no response comes back from the servers.,moderate
+Outlook is showing an old profile photo for a colleague even after they updated it a week ago,simple
+"After a group policy refresh, login scripts stopped executing for users at one site. Users at all other sites are unaffected. The script path is correct and accessible.",complex
+login fails first time then works second try,moderate
+"Two departments are unable to access a shared folder after an AD group restructure. One department regained access after a GPO refresh, the other still cannot. Permissions appear identical in the console.",complex
+User needs the company logo set as their email signature image,simple
+printer prints but alignment wrong,moderate
+User's default printer keeps switching back to a different one after each restart,moderate
+cache clear solves issue but returns later,moderate
+A backup server that replicates to an offsite location is completing replication but the offsite copy is consistently 6 hours behind despite the schedule showing it runs every 2 hours.,complex
+Entire office lost internet access for 15 minutes this morning. Resolved on its own. Cause unknown.,moderate
+A batch file that automates invoice exports stopped working after a Windows update. The script runs but produces an empty output file.,moderate
+A legacy application that runs in compatibility mode stopped working after a cumulative Windows update. Uninstalling the update causes other critical apps to break.,complex
+User needs the PDF viewer set as the default instead of the browser,simple
+network drops only during calls,moderate
+Screen sharing in Zoom works but only shows a black screen to other participants on one user's machine,moderate
+Teams meetings are choppy for one specific user but their internet speed test shows 80 Mbps. Other apps run fine.,moderate
+notifications delayed by minutes,moderate
+User needs to know how to set up an out-of-office reply on mobile,simple
+A multi-region cloud deployment started showing higher error rates exclusively in one region after a config update was rolled out uniformly across all regions. Rollback in that region alone has no effect.,complex
+Network drives mount correctly at login but become inaccessible after the machine resumes from hibernation,moderate
+Three different applications crash at startup only on machines in one specific OU. Machines in other OUs with similar specs are fine. Logs show a missing DLL but the file exists on disk.,complex
+A user's remote session reconnects fine after a network drop but all clipboard content stops syncing for the rest of that session. Starting a new session restores clipboard functionality.,moderate
+User wants their email font size changed to 12pt by default,simple
+New employee's laptop won't join the domain. Error says 'The specified domain either does not exist or could not be contacted.' Network is reachable and credentials are correct. Another laptop set up the same way joined without issues yesterday.,complex
+Application toolbar icons are too small to read on a high-resolution display,simple
+A remote user's audio cuts out during video calls every time someone else on the call shares their screen,moderate
+Company laptop won't connect to a hotel Wi-Fi even though other personal devices connect fine on the same network,moderate
+"Two users share a machine and each has a separate profile. One user's desktop shortcuts work, the other's are all broken.",moderate
+"After a Group Policy update, users in two OUs lost access to mapped drives. A third OU with the same policy applied is unaffected. Reverting the GPO restores access but breaks a separate security requirement.",complex
+Screensaver is not activating after the set idle time on one machine,moderate
+"After a cloud migration, legacy desktop shortcuts to internal tools no longer work. Updating the URLs fixed it for some users but not others, even after cache clearing and profile resets.",complex
+User needs their voicemail PIN reset,simple
+User needs their display language changed from Spanish to English,simple
+Internal chat tool notifications are not appearing on the user's second monitor when it's set as the primary display,moderate
+Software license server is throwing 'No licenses available' errors even though the license count shows unused seats in the admin portal,complex
+"After merging two AD forests, users from the acquired company can authenticate but their group memberships are not being evaluated correctly by access control policies. Native users are unaffected and group memberships look correct in the directory.",complex
+User wants to remove the password from a PDF they created,simple
+A conference room booking system shows a room as available but when users try to book it they get a conflict error. The room's calendar shows no existing booking.,moderate
+External hard drive shows up in Device Manager but not in File Explorer,moderate
+The company intranet homepage loads blank for users in the Sydney office but works fine everywhere else. VPN and direct connections both affected.,complex
+"After a proxy config change, internal sites load fine but a handful of SaaS tools return SSL errors. Their certificates are valid and unchanged.",moderate
+screen goes black suddenly,simple
+A user's inbox rule that forwards certain emails to a shared mailbox stopped working after their password was changed. The rule is still active and the shared mailbox is accessible.,moderate
+User deleted a folder by mistake and needs it recovered,simple
+mouse not moving,simple
+pdf rendering broken layout,moderate
+api fails only under heavy load hard reproduce locally,complex
+Corporate antivirus is flagging a legitimate internal tool as malware after a definition update,moderate
+System tray icons disappear after every restart on a single machine,simple
+A database stored procedure returns correct results when called directly but produces wrong totals when triggered by the application layer. Query parameters look identical in both cases.,complex
+User's external hard drive makes a clicking noise when plugged in and doesn't mount,simple
+vpn drops during file transfer large size,moderate
+User's laptop time resets to January 2009 after every shutdown. Date is corrected at login by the time server but this causes issues with file timestamps.,moderate
+cloud backup partial files missing,moderate
+USB drive not recognized when plugged in,simple
+A cloud backup job completes with no errors but restoring from that backup produces files with zero bytes. Direct download from the cloud console shows the same result.,complex
+distributed system returning inconsistent responses race condition suspected,complex
+User wants the default browser changed to Chrome,simple
+User wants gridlines turned off in their Excel sheet,simple
+A finance application prompts for a smart card login but the user's smart card reader isn't being detected on their new laptop,moderate
+"User gets a certificate error when visiting the internal HR portal. Error only appears in Chrome, not Edge.",moderate
+"After a certificate renewal on the internal auth server, SSO works for web apps but desktop apps prompt for credentials repeatedly. Token logs show successful issuance but clients reject them.",complex
+wifi icon missing,simple
+"After a laptop replacement, user's saved browser passwords didn't migrate over",simple
+User's laptop won't turn on,simple
+User's headset audio cuts out when they turn their head to the left,simple
+Emails sent from a shared mailbox are landing in recipients' spam folders. Started happening this week. No changes were made to the mailbox settings.,moderate
+security configs blocking services intermittently unclear rules,complex
+"Two applications share a database. After a schema change, one application runs fine but the other throws column not found errors for a column that exists and is populated.",complex
+User's Teams is not showing notifications even though they are enabled in settings,moderate
+"After enabling disk encryption on a batch of new laptops, four machines take over 20 minutes to boot. The others boot normally. Hardware specs are identical across the batch.",complex
+User's quick access shortcuts in File Explorer disappeared,simple
+User can't log into the time-tracking system. Reset password didn't help.,moderate
+camera blurry image,simple
+User cannot see the ruler in Microsoft Word,simple
+Application menu bar is missing on one user's machine after a software update,moderate
+"After upgrading a web server to a newer TLS version, one internal application stopped connecting to it. The application's logs show a generic handshake failure with no cipher detail.",complex
+security policy blocking some services randomly not consistent,complex
+VoIP desk phone shows 'No Service' after being moved to a different floor,moderate
+User's phone keeps disconnecting from the corporate Wi-Fi but stays connected to the guest network,moderate
+Keyboard shortcut to switch audio output device stopped working,simple
+"After a middleware upgrade, one integration passes data correctly in the test environment but silently drops records containing null values in production, while test data does not include nulls",complex
+User needs a second email alias added to their account,simple
+"After restoring an Exchange mailbox from backup, the user can send and receive emails but their folder structure is missing. The backup log confirms all folders were included.",complex
+User spilled water on keyboard. Some keys not responding.,simple
+"After an ERP patch, the approval workflow sends notifications correctly for low-value requests but skips the second approver for any request above a threshold. The threshold field in the config is set correctly.",complex
+"After enabling BitLocker on a fleet of laptops, five specific machines fail to boot and show a recovery key prompt every time, while the rest start normally",complex
+"A power outage caused a server to shut down uncleanly. After restart, most services came up but one keeps crashing within 30 seconds of starting. No errors appear before the crash.",complex
+Application toolbar disappeared after the window was resized,simple
+"After enabling MFA on a shared service account used by three automated workflows, two workflows adapted successfully but the third fails silently with no error output and no auth log entry.",complex
+CCTV management software crashes on startup after a Windows Defender definition update. Rolling back the update fixes it but leaves the machine unprotected.,complex
+Laptop shuts down abruptly when battery drops to 30%. Battery health report shows normal capacity.,moderate
+keyboard typing double letters,simple
+server latency high but cpu low maybe io bottleneck unclear,complex
+internet connected but very slow only some apps affected,moderate
+Daily scheduled backup job fails every Monday but runs successfully Tuesday through Sunday. No changes were made to the backup schedule.,complex
+A web application returns a 200 response but displays a blank page in Chrome. Firefox shows content correctly. No console errors appear in Chrome.,moderate
+User deleted their own email account from Outlook by mistake. Needs it re-added.,simple
+User's display is stuck at 60Hz and the option to change it is greyed out,moderate
+Shared mailbox delegate access works in Outlook web but not in the desktop client for one specific user,moderate
+User wants to know how to merge cells in Excel,simple
+usb disconnecting when moving cable,moderate
+A service account used by an automation tool was included in a routine password expiry enforcement. The tool has no mechanism to prompt for a new password and fails silently. Three dependent workflows stopped producing output with no alerts raised.,complex
+User's laptop is prompting for a BIOS password they never set,moderate
+A user's machine is applying a software restriction policy that prevents them from running a tool their role requires. The policy was not intentionally applied to their account.,moderate
+"After migrating a SharePoint site to a new URL, links embedded in old emails now redirect to an access denied page for external users. Internal users are redirected correctly.",complex
+User wants their taskbar moved back to the bottom of the screen,simple
+A Python automation script that runs nightly started producing duplicate records in the database. The script logic hasn't changed. Duplicate entries correlate with days when the server load was high.,complex
+User is unable to print from a specific application only. All other apps print normally to the same printer.,moderate
+A firewall log shows traffic from an internal IP hitting an external blocklisted address repeatedly. The machine shows no malware on scan. The traffic pattern matches a legitimate app's update check but the destination IP doesn't belong to that vendor.,complex
+Two buildings share a fiber uplink. One building lost access to internal servers but can still reach the internet. The other building has no issues.,complex
+A monitoring alert keeps firing for high CPU on a server but the process list shows nothing above 20% usage. Metrics from two different tools disagree on actual CPU load.,complex
+"After enabling audit logging on the file server, write performance dropped by 40% for all users accessing large files",complex
+data mismatch after integration between modules maybe transformation logic issue,complex
+Application license is valid but the software reverts to a restricted mode after the machine is offline for more than 48 hours,moderate
+An internal REST API started returning 504 timeout errors for requests that take longer than 30 seconds. Shorter requests work fine. Issue affects all consumers of the API.,complex
+"After a switch port was replaced on a server, the bonded network interface dropped from 2Gbps to 1Gbps. Both physical ports show as active and the bond config is unchanged.",complex
+Laptop fan is louder than usual even when the machine is idle,moderate
+usb drive not showing,simple
+User's keyboard media keys stopped controlling system volume and now open browser tabs instead,simple
+User's account shows as active in AD but they can't authenticate to any system,moderate
+A digitally signed document is showing as invalid signature on some machines but valid on others. Certificate chain appears complete on all machines.,complex
+An SFTP job that transfers payroll files to a third-party vendor started failing with a key exchange error after the vendor rotated their server keys. Internal SFTP transfers are unaffected. The new key was added to the known hosts file.,complex
+Shared team inbox stopped showing new emails in Outlook but they appear fine in the web version,moderate
+login works on one device not on another,moderate
+User's webcam is recognized but always opens in low resolution regardless of app settings,moderate
+"After enabling HTTPS on an internal web app, links within the app that use hardcoded HTTP URLs stopped working for users on networks that block HTTP. Users on other networks are unaffected.",complex
+"After a network switch replacement, devices on VLAN 30 can reach the internet but can't communicate with devices on VLAN 10. Devices on other VLANs are unaffected.",complex
+User cannot locate the network drive they need. It was always there before.,simple
+User's laptop won't resume from sleep when the lid is opened,simple
+folder permissions keep changing,moderate
+A specific Excel macro runs fine on some machines but throws a runtime error on others. All machines have the same Office version. The macro accesses a shared network path.,complex
+Newly installed application is missing from the Start menu but is visible in the list of installed programs,simple
+"After adding a new VLAN for IoT devices, those devices can access the internet but cannot reach the internal monitoring server, which is on a different VLAN. Routing rules appear correct.",complex
+The internal helpdesk portal loads correctly for most users but shows a blank form section for users on older versions of Safari,moderate
+Newly provisioned user account can log into the domain but gets a black screen after login with no desktop loading,moderate
+Scanner produces washed-out images for one document type but scans all other documents clearly,moderate
+User's machine is not picking up the latest software updates despite being set to auto-update,moderate
+Application shortcut on the desktop opens the wrong version of the software,simple
+User's second monitor keeps turning off after 2 minutes even though display sleep is disabled,moderate
+An internal monitoring dashboard stopped displaying real-time data for one of five data sources. The source itself is live and accessible directly. The dashboard shows stale data only for that feed.,complex
+Laptop keyboard backlight stays on even when the laptop is locked,simple
+A vendor's remote access tool is connecting successfully but the screen stays black. Audio and clipboard sharing work fine.,moderate
+no sound from laptop speakers,simple
+User migrated to a new machine and their browser bookmarks didn't carry over,simple
+login error sometimes but works retry,moderate
+PDF printer is installed but doesn't appear in the print dialog for one specific application,moderate
+Headset works on the user's personal laptop but produces static on the work laptop,simple
+User wants to set up an email rule to move newsletters to a specific folder,simple
+speaker muted not unmuting,simple
+User's PDF is printing with a grey background that doesn't appear on screen,moderate
+Application performance degrades significantly after 2 PM every day. Server resource usage looks normal. Issue resolves overnight without any intervention.,complex
+User's desktop icons disappeared after they logged out and back in,simple
+A middleware service that brokers data between two internal systems started timing out for payloads above 2MB. Smaller payloads go through fine. No config changes were made recently.,complex
+Keyboard language switched to French and user can't type normally,simple
+cache sync issue between nodes stale data persists,complex
+pc stuck on login screen,simple
+User's PDF viewer is opening files in the browser instead of the desktop application,simple
+"Single user cannot send emails. Receiving works. No error shown when sending, but messages stay in Outbox.",moderate
+Bluetooth headset pairs but no audio comes through during calls,moderate
+User's work email is not appearing on their new iPhone after following setup instructions,simple
+Three VMs on the same host started experiencing packet loss at the same time. The host network interface shows no errors. VMs on a second host on the same switch are fine.,complex
+User's fingerprint login stopped working after a firmware update,simple
+A CI/CD pipeline that deploys to the staging server started failing at the deployment step only on Fridays. Logs show a permission error that doesn't appear on other days.,complex
+User's wireless keyboard keeps losing connection after a few minutes of inactivity,simple
+User wants dark mode enabled in Outlook,simple
+User needs the lock screen timeout reduced to 5 minutes,simple
+"After adding a secondary DNS suffix to workstations at a branch office, local hostname resolution broke for devices on that subnet. Removing the suffix restores resolution.",complex
+touchpad disabled maybe,simple
+Caps lock key is stuck on and won't turn off,simple
+A remote desktop session disconnects whenever the user tries to print from within it. Printing locally works fine. Only one specific printer causes the disconnect.,moderate
+Two monitors show different color temperatures despite both being calibrated last week,simple
+"After a storage array firmware upgrade, one application's database throws read errors intermittently. Other applications using the same array work fine. No errors in the array's own logs.",complex
+Audio output switches automatically to the wrong device every time a USB device is plugged in,simple
+A nightly sync between the CRM and the data warehouse has been silently skipping records where the account name contains an ampersand. No error is logged and row counts match because deletions offset the skipped inserts.,complex
+User's cursor jumps around while typing on the laptop,moderate
+A custom PowerShell script that provisions new user accounts started failing for users whose names contain special characters. Works fine for standard names.,complex
+"After a firewall rule update, one internal application can reach its database but a second application on the same server cannot, despite both using identical connection strings",complex
+api failures only under concurrency stress difficult reproduce,complex
+pc not detecting wifi,simple
+A backup agent installed on a new server is visible in the backup console but jobs assigned to it never start. Jobs on all other agents run on schedule.,complex
+Two users in the same team get different search results for the same query in the internal knowledge base. Both have identical roles and permissions.,complex
+An on-premise application that pulls exchange rates from an external API started returning stale data. The API is live and returning current data when called directly. The application's cache was cleared.,complex
+User needs a new folder created on the shared drive,simple
+Touchpad clicks are registering as double-clicks,simple
+"After a WAN link failover, branch office traffic started routing through the backup link correctly but latency to internal servers tripled. The backup link has sufficient bandwidth and no QoS rules applied.",complex
+User reports that some emails are arriving 2 to 3 hours late. Not happening for all senders.,moderate
+A webhook that triggers automated Slack alerts started sending duplicate notifications. The sending service logs show each event fired once.,moderate
+User cannot connect to a specific internal website but can reach all other internal and external sites,moderate
+User can't find the Recycle Bin on their desktop,simple
+A weekly report emailed to senior management contains correct data for all regions except one which always shows last week's figures. The underlying query pulls fresh data for all regions.,complex
+"After promoting a secondary domain controller to primary, user authentication works but audit logs stopped populating. The logging policy is enabled on the new primary and was working on the old one.",complex
+"After a router firmware rollback, wireless clients on the 5GHz band are getting IPs from the wrong DHCP scope. The 2.4GHz band is unaffected.",complex
+User's laptop doesn't recognise the SD card inserted in the built-in slot,moderate
+User's laptop won't detect any Bluetooth devices after a Windows update,moderate
+A nightly ETL job that pulls from three data sources started producing mismatched row counts in the output. Two sources are consistent. The third source has a replication lag that varies by time of day.,complex
+User needs the microphone unmuted on a conference room device,simple
+Printer driver install fails silently with no error on one specific machine,moderate
+"After enabling MFA for a user, they can log into the web portal but cannot authenticate into the desktop app. The desktop app does not support MFA prompts.",complex
+An automated nightly database backup completes successfully but the backup file is always 0 KB in size,complex
+User wants the font size increased on their display for readability,simple
+"After enabling audit logging on an SQL server, three stored procedures that ran in under one second now take over a minute. Disabling logging restores performance. No index changes were made.",complex
+A new employee's machine is not receiving any GPO settings despite being joined to the correct OU. Other machines joined at the same time are receiving policies without issue.,moderate
+User needs their name updated in the email directory after a legal name change,simple
+files uploading very slow but download ok,moderate
+An automated email report attaches a PDF that is password protected. Recipients have the correct password but cannot open it on mobile devices. Desktop opens it fine.,complex
+An SNMP monitoring tool stopped receiving traps from 4 out of 30 network devices after a VLAN reconfiguration. The 4 devices are on different VLANs but all route through the same core switch.,complex
+A user is being asked to re-authenticate every 15 minutes on the internal portal despite 'Remember me' being selected,moderate
+User's local printer prints a test page fine but jobs from specific applications get stuck in the queue,moderate
+A virtual desktop session freezes for exactly 5 seconds every time a file is saved to the network location. Local saves are instant. Only one user experiences this despite others using the same VDI pool and file path.,complex
+User needs their personal drive storage quota checked,simple
+User accidentally removed an app from the home screen on their work phone,simple
+One page in a multi-page PDF won't print. The rest print correctly.,simple
+"After switching to a new ISP, outbound emails from the mail server are being rejected by some external domains but not others",complex
+Scanner not showing up in the scan application after a PC was replaced,moderate
+A user's browser homepage keeps resetting to a different site after every restart,moderate
+An intrusion detection system started generating alerts for normal internal traffic after a signature update. Whitelisting the flagged IPs clears the alert temporarily but it returns within the hour.,complex
+The office door access system stopped recognizing employee badges after the server was rebooted this morning. Physical key override still works.,complex
+A Python script that sends daily summary emails started attaching yesterday's report instead of today's. The file naming logic references the current date.,moderate
+"After enforcing TLS 1.3 on internal web servers, an automated health check system started reporting all monitored services as down. The services themselves are accessible and functional.",complex
+User can't hear audio during Teams calls but others can hear them fine,simple
+User needs the corporate wallpaper applied to their desktop,simple
+User cannot open .msg files directly from the network drive. Works fine from their local desktop.,moderate
+User's email signature is missing images when received by external recipients,moderate
+battery draining fast,simple
+"After a password reset, a user's account unlocks briefly then locks again within two minutes. No failed login attempts are logged during that window.",complex
+logs showing no error but functionality breaking unclear root cause,complex

@@ -1,6 +1,6 @@
 # File: backend/app/models/ticket.py
 
-from sqlalchemy import Column, String, Boolean, DateTime, Enum, Integer, Text, ForeignKey, Float
+from sqlalchemy import Column, JSON, String, Boolean, DateTime, Enum, Integer, Text, ForeignKey, Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -58,10 +58,11 @@ class Ticket(Base):
 
     title          = Column(String, nullable=False)
     description    = Column(Text, nullable=False)
-    domain         = Column(Enum(TicketDomain), nullable=False, default=TicketDomain.OTHER)
+    domain         = Column(Enum(TicketDomain, values_callable=lambda x: [e.value for e in x]), nullable=False, default=TicketDomain.OTHER)
     priority       = Column(Enum(TicketPriority), nullable=False, default=TicketPriority.MEDIUM)
     status         = Column(Enum(TicketStatus), nullable=False, default=TicketStatus.OPEN)
-    complexity     = Column(Enum(TicketComplexity), nullable=True)
+    complexity         = Column(Enum(TicketComplexity), nullable=True)
+    model_predictions  = Column(JSON, nullable=True)
 
     ai_diagnosis       = Column(Text, nullable=True)
     ai_confidence      = Column(Float, nullable=True)

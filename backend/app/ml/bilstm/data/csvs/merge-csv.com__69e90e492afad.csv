@@ -1,0 +1,451 @@
+problem_statement,complexity
+Printer offline on 2nd floor.,Simple
+"User can't log in. Password reset didn't help, SSO also failing, and IT says AD looks fine.",Complex
+Outlook won't open.,Simple
+Three users in the same building report VPN drops every afternoon but only on Tuesdays.,Complex
+"Screen brightness stuck at max, adjustment slider does nothing.",Simple
+New hire laptop won't join domain.,Moderate
+"Mouse not working. Tried another port, still dead.",Simple
+Finance app crashes on launch for one user. Others on same team fine. Reinstall didn't fix it.,Moderate
+Wi-Fi keeps disconnecting every 20 minutes. Affects only this one laptop.,Moderate
+Keyboard types wrong characters. US layout selected but keys don't match.,Moderate
+Can't open PDF attachments in email.,Simple
+Random BSODs on a 3-month-old machine. No consistent error code. Happens during video calls.,Complex
+Copy-paste stopped working system-wide.,Simple
+Scanner not detected after Windows update. Driver reinstall fails silently.,Moderate
+User reports their desktop icons rearrange themselves after every reboot.,Moderate
+Excel crashes when saving to a shared drive.,Moderate
+Monitor shows 'No Signal' but cable is fine and GPU works on another screen.,Moderate
+Entire department lost access to shared folder this morning. No permissions change was made.,Complex
+Laptop fan very loud all the time.,Simple
+Email sends fine internally but external recipients never get the messages. No bounce received.,Complex
+Webcam not recognized in any app.,Simple
+"A specific webpage loads for everyone except one user, even after clearing cache and trying incognito.",Moderate
+PC turns on but no display. Beep code heard.,Moderate
+User locked out after entering correct password. Lockout threshold set to 10.,Complex
+Caps lock light blinks three times on startup then system halts.,Complex
+Numpad not working even with Num Lock on.,Simple
+Teams calls drop exactly at 30-minute mark for one specific user.,Complex
+Microphone not picking up sound in meetings.,Simple
+Application login works on desktop but fails on the same user's laptop with identical config.,Complex
+USB drive not showing up.,Simple
+Helpdesk software throws a 500 error when closing tickets assigned to one particular agent.,Complex
+Second monitor flickers occasionally.,Simple
+User's email signature appears blank to recipients on mobile but shows fine on desktop clients.,Moderate
+Touchpad disabled itself and function key shortcut does nothing.,Simple
+Network drive disconnects every night and doesn't reconnect until manually remapped.,Moderate
+Battery drains fully in under two hours on a new laptop.,Moderate
+System clock resets to 2009 on every reboot.,Moderate
+Software license prompt appears even though license is valid and activated.,Moderate
+Headset works in one app but not another.,Simple
+"After migrating to new server, some users can search files but others get no results at all.",Complex
+Scroll wheel on mouse is jumpy.,Simple
+User says their sent emails appear in a colleague's sent folder.,Complex
+VPN connects but user can't reach internal sites. Others on same VPN are fine.,Moderate
+Right-click menu takes 10 seconds to appear.,Moderate
+Single user's calendar stopped syncing. Exchange admin sees no errors server-side.,Complex
+PC powers off when plugged into a specific power strip.,Simple
+Antivirus quarantined a file that's needed for a business app. Restore doesn't stick.,Moderate
+Laptop gets extremely hot only when docked.,Moderate
+Notifications not appearing on desktop.,Simple
+Two users share a printer but one gets correct output while the other's jobs print garbled text.,Complex
+No sound from speakers.,Simple
+VPN connects fine but only this user can't reach the internal wiki. Everyone else is fine.,Complex
+Can't right-click on desktop.,Simple
+Laptop shuts down randomly. Happens more when on battery but also on AC occasionally.,Moderate
+"Two monitors, one keeps going black for a second then comes back.",Moderate
+Printer says ready but nothing prints.,Simple
+User's Outlook search returns emails from 2019 but nothing recent.,Moderate
+My PC is slow.,Simple
+"After password change, user is locked out within minutes despite entering correct credentials.",Complex
+App opens but buttons are unresponsive. Worked yesterday.,Moderate
+USB mouse lags only in one specific corner of the screen.,Complex
+Can't find the Recycle Bin.,Simple
+Three people on the same team can't open the same SharePoint folder. Others can.,Moderate
+Laptop keyboard works but spacebar needs to be pressed hard.,Simple
+Zoom video freezes every few minutes. Audio stays connected. Reinstall didn't help.,Moderate
+"User reports receiving duplicate emails, same sender, same timestamp, two copies.",Complex
+Screen goes to sleep and won't wake up without a hard reboot.,Moderate
+New laptop. Nothing installed yet. Already running at 80% CPU.,Moderate
+Excel file won't open. Says it's in use but no one else has it open.,Moderate
+Numpad produces letters instead of numbers.,Simple
+One user's sent emails are arriving in recipients' inboxes with a two-hour delay.,Complex
+"Headphones connected, no sound, correct device selected.",Simple
+Browser homepage keeps resetting after every launch.,Moderate
+Computer won't recognize any USB device. Ports all tested fine on another machine.,Moderate
+User says files are disappearing from their desktop overnight. No one else has access.,Complex
+Scroll bar missing in one application.,Simple
+Domain login fails only from the office network. Works fine on VPN from home.,Complex
+Laptop doesn't charge when connected to the dock but charges fine with direct cable.,Moderate
+Auto-correct keeps changing a specific word that's spelled correctly.,Simple
+Two users swapped desks and now both have permission issues they didn't have before.,Complex
+Taskbar disappeared.,Simple
+Laptop screen has a small dead pixel cluster in the corner.,Simple
+Antivirus keeps flagging a known-safe internal tool after every update.,Moderate
+File copy to network share stops at exactly 2GB every time.,Complex
+Keyboard shortcut for screenshot stopped working.,Simple
+Meeting room PC won't connect to the TV via HDMI. Cable is fine on other devices.,Moderate
+Same user gets certificate errors on three different browsers on two different machines.,Complex
+"Dropdown menu in one web app is cut off, can't select lower options.",Simple
+PC takes 15 minutes to boot. Happens since last Windows update.,Moderate
+User is getting calendar invites in a language they didn't set.,Moderate
+Caps Lock indicator light doesn't match actual caps lock state.,Simple
+"Four apps share a login. User changed password in one, now two of the four reject it.",Complex
+Wi-Fi shows connected but browser says no internet.,Moderate
+Notification sounds playing at random even when system volume is muted.,Complex
+Webcam works in Teams but not in Zoom.,Moderate
+"Laptop lid close does nothing, screen stays on.",Simple
+One user's print jobs route to a printer on a different floor despite correct default set.,Complex
+External hard drive shows up but files aren't visible.,Moderate
+Task Manager won't open.,Simple
+User on a shared workstation sees another user's desktop background and pinned apps after login.,Complex
+Clock on PC shows wrong time even after manual correction.,Moderate
+User gets logged out of one specific internal app every 9 minutes exactly.,Complex
+Delete key not working.,Simple
+"Same Excel macro runs fine on my PC, crashes on colleague's identical setup.",Complex
+Monitor resolution resets to 1024x768 after every reboot.,Moderate
+Phone won't pair with laptop.,Simple
+Shared calendar shows different appointments depending on which machine you view it from.,Complex
+App installed fine but icon won't appear on desktop.,Simple
+One department's emails are going to spam for external recipients. Other departments are fine.,Complex
+Touchscreen stopped responding to touch.,Simple
+PC restarts during Windows updates but updates never finish.,Moderate
+Microphone volume resets to zero every time the laptop sleeps.,Moderate
+PDF prints with missing images even though they show in preview.,Moderate
+Internet works but Windows says no internet access.,Moderate
+User's name shows incorrectly in all Microsoft 365 apps after a legal name change.,Moderate
+Laptop hinge cracked.,Simple
+"Two users share a mailbox. One sees all folders, the other sees only Inbox.",Complex
+External webcam recognized but shows black screen in every app.,Moderate
+Start menu search returns no results.,Moderate
+Screensaver activates after 1 minute regardless of power settings.,Moderate
+Single key on keyboard registers double input.,Simple
+Mapped drive shows as connected but throws error when accessed.,Moderate
+"After rejoining domain, user lost all desktop shortcuts and browser bookmarks.",Moderate
+Remote desktop disconnects the moment a second monitor is enabled on the remote machine.,Complex
+Wi-Fi adapter missing from Device Manager after update.,Moderate
+User receives out-of-office replies from themselves when emailing colleagues.,Complex
+Docking station works for everyone else but causes this laptop to freeze on connect.,Complex
+Speakers distort sound at any volume level.,Simple
+File server accessible by IP but not by hostname from one specific machine.,Complex
+Copy-paste works everywhere except into one web application.,Moderate
+Teams status stuck on Away even when actively using the computer.,Moderate
+"PC won't boot. Power light comes on, fans spin, nothing on screen.",Moderate
+Specific font missing from Word but installed and visible in Control Panel.,Moderate
+User's email autocomplete keeps suggesting wrong address for a common contact.,Simple
+Application works fine until a second user logs into the same shared PC.,Complex
+Volume control slider moves but output level doesn't change.,Simple
+Laptop battery shows 100% but drops to 0 within 10 minutes.,Moderate
+One user gets a blank white page on the intranet. All others load it fine.,Moderate
+System tray icons disappear after waking from sleep.,Simple
+"After moving to a new desk, user's second monitor is no longer detected.",Simple
+Three different users report that their default browser resets to Edge after each update.,Moderate
+Cursor jumps to random position while typing on laptop.,Moderate
+User's print queue clears but pages never come out of the printer.,Moderate
+Same password rejected by one system but accepted by four others simultaneously.,Complex
+Keyboard backlight won't turn off.,Simple
+Specific contact's emails always land in junk despite being whitelisted three times.,Complex
+Desktop background changed to black. User didn't change it.,Simple
+"App performance degrades progressively throughout the day, fresh login fixes it until next day.",Complex
+CD drive tray opens and closes but disc isn't read.,Simple
+"Two monitors set as extended display, but both show the same screen.",Moderate
+Printer jammed.,Simple
+User's login works on all machines except the one assigned to them.,Complex
+Browser keeps asking to save password for a site with no login page.,Moderate
+Num Lock turns itself off randomly.,Simple
+Same attachment opens fine on phone but corrupts on desktop every time.,Complex
+Laptop overheats only when plugged in.,Moderate
+Can't change desktop wallpaper.,Simple
+Two users merged into one AD account somehow. Both now share inbox and drive.,Complex
+Network cable plugged in but connection shows as disconnected.,Moderate
+Application shortcut opens wrong version of the software.,Simple
+Meeting invites sent from one user show no subject line to all recipients.,Complex
+PC takes long to shut down.,Simple
+One specific website loads in IE but not in Chrome or Firefox.,Moderate
+Hard drive making clicking sound.,Simple
+Software update fails at 99% every attempt. Different error code each time.,Complex
+USB hub works with all devices except this one mouse.,Moderate
+Autosave keeps creating duplicate files instead of overwriting.,Moderate
+User says their wallpaper changes every morning.,Moderate
+Shared printer works for color but not black and white.,Moderate
+Ctrl+Z undoes too many steps at once in one app only.,Moderate
+"Audio cuts out mid-call, comes back after 3 seconds, repeats.",Moderate
+App icon bounces in taskbar but never opens.,Simple
+Windows Hello face recognition stopped working after haircut.,Simple
+One user's VPN traffic routes through a different country than everyone else on the same profile.,Complex
+Second hard drive not showing in File Explorer but visible in Disk Management.,Moderate
+Monitor brightness changes on its own throughout the day.,Moderate
+User enrolled in MFA twice. Now gets two push notifications per login.,Moderate
+Right monitor is detected as left and vice versa.,Simple
+Teams shows user as online to others but user sees themselves as offline.,Complex
+PC won't wake from hibernate but wakes from sleep fine.,Moderate
+License key accepted during install but app asks for it again on every launch.,Complex
+"Laptop speaker works, but headphones plugged into same jack produce no sound.",Simple
+File permissions reset to default every time the file is edited.,Complex
+Clipboard history feature enabled but nothing gets saved to it.,Simple
+User's email replies thread under wrong conversations for specific contacts only.,Complex
+Dock charges laptop but doesn't pass through video.,Moderate
+Folder size shows as 0 bytes but files are visible inside.,Moderate
+System font changed to italic across all apps after update.,Simple
+"One user can edit a shared doc, another with identical access gets read-only.",Complex
+Keyboard works fine except apostrophe key requires two presses.,Simple
+PC randomly enters airplane mode during use.,Moderate
+Application logs out user after idle but doesn't lock the screen.,Moderate
+Search bar in File Explorer crashes when typing more than four characters.,Moderate
+User's profile photo in Teams shows someone else's picture.,Simple
+All printers disappeared from the machine after rejoining the domain.,Moderate
+User reports the mouse cursor is visible on the login screen but keyboard input is not.,Moderate
+"High-res image files open instantly on old laptop, take 40 seconds on new one.",Complex
+Power button triggers sleep instead of shutdown despite settings saying otherwise.,Simple
+New SSD installed but boot time is slower than old HDD was.,Complex
+Desktop icons are slightly blurry on one monitor but sharp on the other.,Simple
+Scroll wheel clicks but doesn't scroll.,Simple
+User's email signature renders correctly in Outlook but strips formatting in webmail only.,Moderate
+Both monitors go black for 2 seconds every hour. Exact interval.,Complex
+keyboard stopped working,Simple
+App runs fine for 30 users. Crashes on launch for one. Clean reinstall did nothing.,Complex
+Touchpad clicks work but two-finger scroll doesn't.,Simple
+PC powers on but operating system never loads. Different error on each attempt.,Complex
+Outlook calendar reminders fire twice for every event.,Moderate
+"Wi-Fi drops only during video calls, not regular browsing.",Moderate
+Webcam LED stays on after app is closed.,Simple
+Same mapped drive path works for IT staff but fails silently for regular users.,Complex
+Night light setting won't stay off.,Simple
+PDF reader opens but all pages appear blank. Other PDFs fine.,Moderate
+User's machine joins calls with echo. No echo on other machines in same room.,Moderate
+Group policy applied but setting not taking effect on one user only.,Complex
+Charging cable works but battery percentage never increases.,Moderate
+Paste works in every app except the one the user needs it in most.,Simple
+"Desktop shows in Safe Mode, black screen in normal boot.",Moderate
+"Three monitors connected, only two detected.",Moderate
+Random app installs appearing on PC overnight. User says they didn't install them.,Complex
+Cursor disappears when moved to second screen.,Simple
+Internal tool works on Chrome but throws JS error on Edge. Both updated.,Moderate
+User insists their sent folder is empty but recipients received the emails.,Complex
+Laptop charges to 80% and stops. Battery health shows fine.,Moderate
+"Specific shared folder accessible Monday to Thursday, permissions error on Fridays.",Complex
+Computer makes beep when USB plugged in but device not recognized.,Simple
+Print preview looks correct but output is mirrored horizontally.,Moderate
+Slack notifications appear on lock screen but not when logged in.,Moderate
+User's machine broadcasts on network under someone else's hostname.,Complex
+SD card slot not reading any cards.,Simple
+Excel auto-fills dates incorrectly only in columns with merged cells above.,Complex
+New keyboard types fine but media keys don't work.,Simple
+VPN disconnects whenever user opens a specific internal application.,Complex
+Font size in one app changes after every system restart.,Moderate
+User reports emails arriving with tomorrow's date.,Moderate
+All icons on taskbar are correct except one which shows a generic blank icon.,Simple
+One user in a shared team drive can move files but can't rename them.,Moderate
+Sleep mode works but hibernate corrupts a file on the desktop each time.,Complex
+Laptop screen dims after 5 seconds regardless of power plan settings.,Moderate
+Audio input and output swapped after update. Headset mic routes as speaker.,Moderate
+Wi-Fi connects but only to 2.4GHz band even when 5GHz is selected.,Moderate
+User received an email from their own address that they did not send.,Complex
+Colour profile resets on the monitor after every reboot.,Simple
+Application opens on the wrong monitor every time despite being closed on the correct one.,Moderate
+Three users share a machine across shifts. One shift's profile loads for all of them.,Complex
+Task scheduler job runs manually but not on schedule.,Moderate
+Volume mixer shows app as muted but app plays sound anyway.,Complex
+"HDMI audio works, DisplayPort video works, but not at the same time from same device.",Complex
+Right-click context menu missing the option to open terminal.,Simple
+Laptop keyboard types an extra character on fast keystrokes only.,Moderate
+Spacebar inserts two spaces instead of one.,Simple
+User's Outlook opens but freezes when switching between folders. Webmail works fine.,Moderate
+PC clock gains exactly 4 minutes per day.,Complex
+can't open zip files,Simple
+One specific user's Teams messages deliver to recipients 20 minutes late. Sending looks instant.,Complex
+Laptop screen has a faint horizontal line near the top.,Simple
+Application works after fresh login but breaks when session exceeds 2 hours. Logs show nothing.,Complex
+USB-C port stops charging after laptop gets warm.,Moderate
+Desktop wallpaper looks stretched on one monitor but not the other.,Simple
+"Shared mailbox shows correct emails on desktop app, but phone app shows older emails.",Moderate
+User's machine drops off the domain silently every few days. Rejoin fixes it temporarily.,Complex
+Headphone jack crackles at certain volume levels.,Simple
+New user account created but can't receive external emails. Internal mail works.,Moderate
+Mouse acceleration feels off after driver update.,Simple
+Specific report in the internal dashboard shows data from wrong date range for one user.,Complex
+Bluetooth connects then immediately disconnects.,Moderate
+Laptop battery drains faster than usual but only when a second display is connected.,Moderate
+Right monitor is 1 pixel lower than left no matter how alignment is adjusted in settings.,Simple
+User's login session on shared workstation is still active after they physically left the building.,Complex
+VPN works on home Wi-Fi but not on mobile hotspot.,Moderate
+Taskbar clock disappeared but taskbar is still visible.,Simple
+"After update, one team's shared drive appears empty until you search for a specific file.",Complex
+Wireless keyboard has input delay only for the first keystroke after idle.,Simple
+Snipping tool captures black rectangle instead of screen content.,Moderate
+File server folders load slowly for users in one office but fast for another branch.,Moderate
+User reports their chat status in Teams resets to Busy every morning at 9am automatically.,Complex
+Laptop charging light blinks orange instead of white.,Simple
+Copy from web browser pastes as plain text in Word but as formatted in Notepad.,Complex
+Application only crashes on this user's machine when another specific app is also open.,Complex
+Page numbers in Word document restart at 1 mid-document for no clear reason.,Moderate
+Volume icon missing from system tray.,Simple
+Remote desktop session disconnects only when user is idle for exactly 10 minutes.,Moderate
+User's browser bookmarks disappeared after profile sync.,Moderate
+Two factor authentication prompt appears twice per login on one device only.,Complex
+Screensaver activates mid-presentation even when presentation is running.,Simple
+Shared OneNote notebook shows different content on desktop versus browser for same user.,Complex
+External hard drive ejects itself after a few minutes.,Moderate
+Keyboard types fine but Windows key does nothing.,Simple
+Same user gets access denied on a folder Monday but it works fine on Tuesday.,Complex
+Display driver keeps crashing and recovering on one specific game only.,Moderate
+Outlook shows unread count on folder but opening it shows no unread emails.,Moderate
+"New laptop, battery health already at 79%.",Simple
+"After migrating user to new machine, their shortcuts all work but one opens a blank window.",Complex
+PC fan runs loudly only when browser is open.,Moderate
+Audio output switches from headphones to speakers randomly during use.,Moderate
+User's quick access in File Explorer shows folders from a former colleague's profile.,Complex
+Cursor stutters when two Bluetooth devices connected simultaneously.,Moderate
+Print to PDF saves file with no extension.,Simple
+App update removed a menu option the user relies on daily.,Simple
+Wi-Fi calling drops every time a microwave operates nearby.,Moderate
+F5 key stopped refreshing pages.,Simple
+User's calendar shows meetings in wrong timezone despite timezone set correctly on all devices.,Complex
+Laptop lid closes but screen stays on.,Simple
+Specific Excel formula returns wrong result only when file is stored on the network share.,Complex
+Microphone volume resets to 0 after every reboot.,Moderate
+Can't rename files on desktop.,Simple
+Same VPN profile connects in under 5 seconds for everyone except one user who waits 4 minutes.,Complex
+App drawer shows duplicate icons for the same application.,Simple
+"After IT replaced the switch, two printers stopped being visible on the network.",Moderate
+User's out-of-office reply fires for internal emails but not external.,Moderate
+Hard drive activity light stays solid on during idle.,Moderate
+Both USB ports on left side of laptop stopped working simultaneously.,Simple
+Teams meeting recording saves to wrong user's OneDrive even though host started the recording.,Complex
+Screen flickers when scrolling in browser only.,Moderate
+Password manager autofill stopped working on one specific internal site.,Simple
+New PC takes longer to log in than the 5-year-old machine it replaced.,Complex
+User's desktop icons are invisible but reappear when hovered over.,Moderate
+SSD shows in BIOS but not in Windows disk management.,Moderate
+Different users see different versions of the same shared document simultaneously.,Complex
+Airplane mode toggle missing from quick settings.,Simple
+App crashes only when printing. All other functions work.,Moderate
+Guest Wi-Fi works fine but corporate network drops every few minutes on same laptop.,Complex
+Monitor turns off mid-session and won't wake up until unplugged.,Moderate
+Task manager shows 0% CPU and 0% GPU but machine feels sluggish.,Complex
+"Keyboard backlight only works on battery, not when plugged in.",Simple
+User gets password expiry warning daily despite having changed password yesterday.,Complex
+External mouse works but built-in trackpad is disabled and can't be re-enabled.,Moderate
+Print queue shows job as completed but paper never came out.,Moderate
+One specific font renders with incorrect spacing in one app on one machine.,Complex
+Display goes to sleep every 2 minutes even during active use.,Moderate
+Application installed for all users but appears only in one user's Start menu.,Moderate
+Right-click on network folder gives properties but size always shows as zero.,Simple
+Smart card reader works but only every other login attempt.,Complex
+Email client shows inbox as empty but count badge shows 47 unread.,Moderate
+Wireless mouse disconnects when laptop screen brightness is above 70%.,Complex
+Screenshot shortcut saves file but also opens paint.,Simple
+User's mapped drives appear connected but show red X only on their account.,Moderate
+Video call background blur works on one camera but not the other on same device.,Moderate
+System tray notification badges disappeared after display scaling changed.,Simple
+"Two users, same role, same permissions, one can run reports the other can't.",Complex
+Browser always opens maximised even when closed as a small window.,Simple
+Application remembers window position on single monitor but forgets it when second is added.,Moderate
+VPN reconnects automatically but DNS stops resolving after each reconnection.,Complex
+Device manager shows no issues but scanner not detected by any software.,Moderate
+User's profile picture on Teams updates immediately but shows old photo in Outlook.,Moderate
+Clock widget disappeared from desktop.,Simple
+"Laptop charges fine but battery icon always shows plugged in, not charging.",Simple
+User reports mouse sensitivity doubles when a particular app is running in the background.,Complex
+File explorer navigation pane missing the desktop shortcut.,Simple
+HDMI connected to projector but laptop screen goes black instead of mirroring.,Moderate
+Tab key skips two fields instead of one in web form.,Simple
+User's machine connects to wrong Wi-Fi SSID automatically despite correct network being in range.,Moderate
+"Exact same file opens in 2 seconds on old PC, 18 seconds on new one.",Complex
+webcam not working,Simple
+One user's replies in a shared mailbox appear to come from their personal address instead.,Complex
+Ctrl+F search bar not appearing in browser.,Simple
+Application works for all users on floor 2 but hangs on launch for everyone on floor 3.,Complex
+"Laptop overheats only when running on battery, stays cool when plugged in.",Moderate
+Drag and drop stopped working in file explorer.,Simple
+User receives meeting invites they already declined every morning at 8am.,Complex
+Keyboard shortcuts work in all apps except the one used most by this team.,Moderate
+Second monitor detected but shows as mirror even when extended mode is selected.,Moderate
+PC won't resume from sleep when woken by keyboard. Mouse works fine.,Simple
+User profile loads but desktop is completely empty. Taskbar present.,Moderate
+Teams presence status visible to everyone else but shows as unknown to one specific colleague.,Complex
+touchpad too sensitive,Simple
+App font size is correct on all machines except the one with 4K display.,Moderate
+User's email sorting by date stopped working. Emails appear in random order.,Moderate
+Network printer works for black and white but color jobs disappear from queue silently.,Complex
+Sticky notes app lost all notes after update.,Simple
+"Same URL bookmarked on two machines opens different pages, one is outdated cached version.",Moderate
+"After system restore, one application works but its license is no longer recognised.",Moderate
+User gets admin prompt every time they open a specific folder.,Simple
+Microphone picks up audio but voice recognition software only activates intermittently.,Complex
+PC connected to ethernet but still using Wi-Fi for traffic.,Moderate
+New joiner account created in AD but user not visible in company directory after 3 days.,Moderate
+Screen resolution correct but all text appears blurry on external monitor.,Simple
+Two printers with same name on network. Jobs go to wrong one randomly.,Complex
+"Antivirus scan completes instantly and shows no results, suspicious given drive size.",Complex
+Mouse right-click only works when left button held down simultaneously.,Simple
+Application crashes only when a specific colleague is also logged in remotely to same server.,Complex
+Recovery partition missing from disk management after OS reinstall.,Moderate
+User's files visible in recycle bin but restore option is greyed out.,Moderate
+Laptop screen has a small green dot that disappears when a white background is displayed.,Simple
+Wi-Fi password correct but connection fails only from conference room on 4th floor.,Moderate
+Script runs fine interactively but fails when scheduled with same user credentials.,Complex
+Power button triggers restart instead of shutdown.,Simple
+File upload works for all file types except CSV in one specific internal portal.,Moderate
+User's photo on ID card system updated but old photo still showing on door access panel.,Complex
+Bluetooth headset connected but only left ear has audio.,Simple
+"After rejoining domain, software centre shows no available applications for this user.",Moderate
+One specific column in shared spreadsheet shows formula instead of value for one user.,Complex
+Laptop keyboard produces numbers when typing letters. No NumLock key present.,Moderate
+Quick access toolbar missing from all Office apps after profile migration.,Simple
+VPN client launches but tray icon never appears. Connection established but unmanageable.,Complex
+Display turns off during video playback but not during any other activity.,Moderate
+User's recent files list in Word shows files from a different user's profile.,Complex
+Insert key triggers overtype mode but can't be disabled from keyboard.,Simple
+Sound output works but input level meter shows no movement despite microphone active.,Moderate
+Application license valid on standalone machine but rejected when same machine joins domain.,Complex
+Home button missing from browser toolbar.,Simple
+User's machine intermittently sends print jobs to a decommissioned printer that no longer exists.,Complex
+Laptop screen brightness stuck at 50% after update.,Simple
+"Same internal tool loads in 1 second for most staff, takes 40 seconds for the finance team only.",Complex
+Notifications badge on app icon not clearing after messages are read.,Simple
+"After office move, two users lost access to a shared drive no one else touched.",Moderate
+Battery percentage jumps from 60% to 20% instantly without warning.,Moderate
+ctrl+s not saving in one specific application,Simple
+User's machine registers keystrokes twice but only in remote desktop sessions.,Complex
+Laptop connected to dock but ethernet through dock not working. Wi-Fi fine.,Moderate
+Windows update history shows successful install but feature is still missing.,Moderate
+Find and replace in Word replaces correct text but also changes unrelated formatting.,Complex
+Pointer trails setting keeps re-enabling itself.,Simple
+Application loads correctly but submitting any form returns a blank page.,Moderate
+Backup drive shows correct used space but all folders appear empty when browsed.,Complex
+Menu bar disappeared in one application.,Simple
+User's messages in group chat visible to everyone except one specific participant.,Complex
+Mouse cursor changes to crosshair randomly and stays until reboot.,Moderate
+"PC powers on, posts, then restarts in a loop before reaching login.",Moderate
+One attachment type downloads correctly but always opens with the wrong app.,Simple
+"Two machines same spec same config, one runs the application fine, other gets timeout errors.",Complex
+Shutdown takes over 10 minutes since last update.,Moderate
+User's recent documents list stopped updating.,Simple
+"Same shared inbox, same permissions — one user sees 200 emails, the other sees 80.",Complex
+Wi-Fi signal strong but speed tests show under 1Mbps on this device only.,Complex
+Search bar in start menu has stopped indexing new files.,Moderate
+Application toolbar icons all became identical grey squares.,Moderate
+"Laptop only charges when powered off, not while in use.",Moderate
+User's replies always get flagged as spam by recipients on one specific domain.,Complex
+Touchpad stops working when an external mouse is unplugged.,Simple
+Remote session disconnects whenever local machine locks.,Moderate
+Keyboard language switches automatically mid-session.,Moderate
+Browser extension visible in toolbar but has no effect on any site.,Simple
+"Shared calendar editable for all team members except one, even after permissions re-applied.",Complex
+Windows hello PIN works but fingerprint reader stopped being offered as option.,Simple
+"App opens behind all other windows every time, can't change it.",Simple
+"After password reset, user can log in locally but not via remote desktop.",Moderate
+"Same user account, two machines — file associations differ between them despite same OS build.",Complex
+Monitor overscan cutting off edges of display.,Simple
+Specific website works on all browsers except the one set as default.,Moderate
+User's typed text appears with a 3-second delay on screen only in one app.,Moderate
+Peripheral works on all USB ports except the one next to the HDMI port.,Simple
+Laptop resumes from sleep but Wi-Fi takes 5 minutes to reconnect.,Moderate
+"Three applications share single sign-on. Login works for two, loops on the third.",Complex
+Recycle bin icon not changing when items are inside it.,Simple
+Automatic timezone detection sets wrong city despite location services enabled.,Moderate
+"New machine identical to old one, but one legacy app refuses to run citing OS version.",Moderate
+"User's access revoked on system they never had access to, now blocking their actual account.",Complex
+Page layout view missing from one user's Word ribbon despite same version as colleagues.,Moderate
+Screen reader announces wrong element names on company intranet for one user only.,Complex

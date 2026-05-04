@@ -20,5 +20,27 @@
     "uploaded_by_role": "engineer_auto",
     "chunk_count": 1,
     "created_at": "2026-04-20T10:06:18.979404"
+  },
+  "de3d1fbd-c9b0-4243-a7fc-a6276ef1a746": {
+    "id": "de3d1fbd-c9b0-4243-a7fc-a6276ef1a746",
+    "title": "aws troubleshooting ",
+    "filename": "aws_ec2_troubleshooting.txt",
+    "domain": "networking",
+    "description": "",
+    "uploaded_by": "a5e9b33b-a8f7-453f-acfe-27d89278c634",
+    "uploaded_by_role": "admin",
+    "chunk_count": 2,
+    "created_at": "2026-04-21T09:06:00.694370"
+  },
+  "0112a2d5-ceb4-4a6f-ac43-951d64b47655": {
+    "id": "0112a2d5-ceb4-4a6f-ac43-951d64b47655",
+    "title": "Resolved: DevOps issue \u2014 24/4/2026",
+    "filename": "ticket_T-1002.txt",
+    "domain": "devops",
+    "description": "Auto-indexed from resolved ticket T-1002",
+    "uploaded_by": "43a3bde2-b344-4882-ac91-4f99d41fe309",
+    "uploaded_by_role": "engineer_auto",
+    "chunk_count": 1,
+    "created_at": "2026-04-24T16:50:44.632347"
   }
 }

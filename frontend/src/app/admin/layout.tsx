@@ -6,14 +6,16 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 
 const navItems = [
-  { href: '/admin/overview',       label: 'Overview',       icon: '▣' },
-  { href: '/admin/engineers',      label: 'Engineers',      icon: '◈' },
-  { href: '/admin/tickets',        label: 'All Tickets',    icon: '◉' },
-  { href: '/admin/knowledge-base', label: 'Knowledge Base', icon: '◫' },
-  { href: '/admin/config',         label: 'Configuration',  icon: '◧' },
-  { href: '/admin/audit-log',      label: 'Audit Log',      icon: '◪' },
-  { href: '/admin/analytics',      label: 'Analytics',      icon: '◬' },
-]
+    { href: '/admin/overview',       label: 'Overview',       icon: '▣' },
+    { href: '/admin/engineers',      label: 'Engineers',      icon: '◈' },
+    { href: '/admin/tickets',        label: 'All Tickets',    icon: '◉' },
+    { href: '/admin/knowledge-base', label: 'Knowledge Base', icon: '◫' },
+    { href: '/admin/config',         label: 'Configuration',  icon: '◧' },
+    { href: '/admin/audit-log',      label: 'Audit Log',      icon: '◪' },
+    { href: '/admin/analytics',      label: 'Analytics',      icon: '◬' },
+    { href: '/admin/model-stats',    label: 'Model Stats',    icon: '◍' },
+    { href: '/admin/routing-simulator', label: 'Routing Simulator' },
+  ]
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()

@@ -40,7 +40,7 @@ class EscalateRequest(BaseModel):
     session_id: str
     title: str
     description: str
-    domain: TicketDomain
+    domain: Optional[str] = None
     priority: TicketPriority
     steps_tried: Optional[str] = None
 
@@ -55,7 +55,7 @@ class UserTicketResponse(BaseModel):
     id: uuid.UUID
     ticket_number: str
     title: str
-    domain: TicketDomain
+    domain: Optional[str] = None
     priority: TicketPriority
     status: TicketStatus
     engineer_name: Optional[str] = None
