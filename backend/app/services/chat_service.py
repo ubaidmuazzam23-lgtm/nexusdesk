@@ -1,1064 +1,740 @@
-# # File: backend/app/services/chat_service.py
-
-# from sqlalchemy.orm import Session
-# from sqlalchemy import func
-# from fastapi import HTTPException
-# from datetime import datetime, timedelta
-# from typing import Optional
-# import uuid
-# import json
-# import pytz
-# import os
-# import anthropic
-
-# from app.core.config import settings
-# from app.models.user import User
-# from app.models.ticket import Ticket, TicketStatus, TicketPriority, TicketComplexity, TicketDomain
-# from app.models.engineer import Engineer, AvailabilityStatus
-# from app.schemas.chat import (
-#     ChatMessageRequest, ChatMessageResponse,
-#     EscalateRequest, EscalateResponse, UserTicketResponse,
-# )
-
-# _client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-
-# PRICE_INPUT_PER_MILLION  = 3.00
-# PRICE_OUTPUT_PER_MILLION = 15.00
-
-# SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "screenshots")
-# os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-
-# _sessions: dict = {}
-
-# VALID_DOMAINS = [
-#     "networking", "hardware", "software", "security",
-#     "email_communication", "identity_access", "database",
-#     "cloud", "infrastructure", "devops", "erp_business_apps",
-#     "endpoint_management", "other",
-# ]
-
-# # ── CNN mappings ──────────────────────────────────────────────────────────────
-# CNN_CLASS_TO_DOMAIN = {
-#     "bsod":"hardware","memory_error":"hardware","cpu_high":"infrastructure",
-#     "disk_full":"infrastructure","hardware_failure":"hardware",
-#     "dns_error":"networking","network_unreachable":"networking","vpn_error":"networking",
-#     "ssl_error":"security","timeout":"networking","permission_denied":"security",
-#     "login_failed":"identity_access","mfa_error":"identity_access","session_expired":"identity_access",
-#     "app_crash":"software","update_error":"software","install_error":"software",
-#     "dependency_error":"devops","db_connection_error":"database",
-#     "db_query_error":"database","db_timeout":"database",
-#     "cloud_auth_error":"cloud","deployment_error":"devops",
-#     "container_error":"devops","general_error":"other",
-# }
-# CNN_CLASS_TO_SEVERITY = {
-#     "bsod":"critical","memory_error":"high","cpu_high":"high","disk_full":"high",
-#     "hardware_failure":"critical","dns_error":"high","network_unreachable":"critical",
-#     "vpn_error":"high","ssl_error":"high","timeout":"medium","permission_denied":"high",
-#     "login_failed":"medium","mfa_error":"medium","session_expired":"low",
-#     "app_crash":"high","update_error":"medium","install_error":"medium",
-#     "dependency_error":"medium","db_connection_error":"critical","db_query_error":"high",
-#     "db_timeout":"high","cloud_auth_error":"high","deployment_error":"critical",
-#     "container_error":"critical","general_error":"medium",
-# }
-# CNN_CLASS_LABELS = {
-#     "bsod":"Windows Blue Screen of Death","memory_error":"Memory / Out of Memory Error",
-#     "cpu_high":"High CPU Usage","disk_full":"Disk Full / Low Storage",
-#     "hardware_failure":"Hardware Failure / Driver Error","dns_error":"DNS Resolution Failure",
-#     "network_unreachable":"Network Unreachable / No Internet","vpn_error":"VPN Connection Error",
-#     "ssl_error":"SSL / Certificate Error","timeout":"Connection / Request Timeout",
-#     "permission_denied":"Permission Denied / Access Error","login_failed":"Login / Authentication Failed",
-#     "mfa_error":"MFA / Two-Factor Auth Error","session_expired":"Session Expired",
-#     "app_crash":"Application Crash / Not Responding","update_error":"Software Update Error",
-#     "install_error":"Installation Failed","dependency_error":"Missing Dependency / Module Error",
-#     "db_connection_error":"Database Connection Error","db_query_error":"Database Query / SQL Error",
-#     "db_timeout":"Database Timeout","cloud_auth_error":"Cloud Permission / Auth Error",
-#     "deployment_error":"Deployment / CI-CD Pipeline Error",
-#     "container_error":"Container / Docker / Kubernetes Error","general_error":"General Error",
-# }
-
-# # ── Prompts ───────────────────────────────────────────────────────────────────
-
-# SYSTEM_PROMPT = """You are an IT support specialist at NexusDesk. Help users fix IT problems through friendly, clear conversation.
-
-# STRICT FORMATTING RULES:
-# - Never use asterisks, hashtags, dashes as bullets, or any markdown symbols
-# - Write in plain natural sentences only
-# - For steps write them as: First do this. Then do that. Finally do this.
-# - Keep responses under 150 words
-# - Sound like a helpful colleague, not a manual
-# - Ask only one question at a time
-# - Do not start with "Certainly!" or "Absolutely!"
-
-# KNOWLEDGE BASE RULES:
-# - If knowledge base articles are provided below, you MUST use them as your primary source of information.
-# - Extract the specific steps, commands, and solutions from those articles and include them directly in your response.
-# - Do not ignore the knowledge base content in favor of generic troubleshooting.
-# - Do not say "according to the knowledge base" — just naturally give the specific advice.
-
-# After 2 failed attempts, tell the user naturally that you recommend getting an engineer involved and they can raise a support ticket.
-
-# If the user says it is fixed, say something brief and warm like "Glad that sorted it out."
-
-# You cover: networking, hardware, software, security, email, identity and access, databases, cloud, infrastructure, devops, ERP and business apps, endpoint management."""
-
-# CLASSIFY_PROMPT = """Classify this IT support conversation. Return only JSON.
-
-# Pick domain from this exact list only:
-# networking, hardware, software, security, email_communication, identity_access, database, cloud, infrastructure, devops, erp_business_apps, endpoint_management, other
-
-# Pick severity:
-# critical = production down or all users affected
-# high = user completely blocked
-# medium = degraded or intermittent
-# low = question or minor issue
-
-# Return only: {"domain": "...", "severity": "..."}"""
-
-
-# # ── Cost tracking ─────────────────────────────────────────────────────────────
-
-# def _calculate_cost(input_tokens: int, output_tokens: int) -> dict:
-#     ic = (input_tokens  / 1_000_000) * PRICE_INPUT_PER_MILLION
-#     oc = (output_tokens / 1_000_000) * PRICE_OUTPUT_PER_MILLION
-#     return {"input_tokens":input_tokens,"output_tokens":output_tokens,
-#             "input_cost":round(ic,6),"output_cost":round(oc,6),"total_cost":round(ic+oc,6)}
-
-
-# def _log_cost(session_id: str, call_type: str, cost: dict, session_total: float, info: str = "") -> None:
-#     print(f"\n{'─'*58}")
-#     print(f"  NexusDesk — {call_type}")
-#     print(f"{'─'*58}")
-#     print(f"  Session : {session_id[:20]}...")
-#     if info: print(f"  Info    : {info}")
-#     print(f"  Input   : {cost['input_tokens']:,} tokens → ${cost['input_cost']:.6f}")
-#     print(f"  Output  : {cost['output_tokens']:,} tokens → ${cost['output_cost']:.6f}")
-#     print(f"  Call $  : ${cost['total_cost']:.6f}")
-#     print(f"  Total $ : ${session_total:.6f}")
-#     print(f"{'─'*58}\n")
-
-
-# # ── Session management ────────────────────────────────────────────────────────
-
-# def _get_session(session_id: str) -> dict:
-#     if session_id not in _sessions:
-#         _sessions[session_id] = {
-#             "messages": [], "domain": None, "severity": None,
-#             "attempt": 0, "total_cost": 0.0,
-#             "screenshot_path": None, "cnn_result": None,
-#         }
-#     return _sessions[session_id]
-
-
-# # ── Domain classifier ─────────────────────────────────────────────────────────
-
-# def _classify_with_claude(text: str, session_id: str, session: dict) -> dict:
-#     try:
-#         response = _client.messages.create(
-#             model="claude-sonnet-4-5", max_tokens=120,
-#             system=CLASSIFY_PROMPT,
-#             messages=[{"role":"user","content":text}],
-#         )
-#         raw = response.content[0].text.strip()
-
-#         # Strip markdown code fences if Claude wraps it
-#         if raw.startswith("```"):
-#             raw = raw.split("```")[1]
-#             if raw.startswith("json"):
-#                 raw = raw[4:]
-#             raw = raw.strip()
-
-#         # Extract JSON object even if there's surrounding text
-#         start = raw.find("{")
-#         end   = raw.rfind("}") + 1
-#         if start == -1 or end == 0:
-#             raise ValueError(f"No JSON found in: {raw!r}")
-#         raw = raw[start:end]
-
-#         data     = json.loads(raw)
-#         domain   = data.get("domain", "other")
-#         severity = data.get("severity", "medium")
-#         if domain not in VALID_DOMAINS:                        domain = "other"
-#         if severity not in ["critical","high","medium","low"]: severity = "medium"
-
-#         cost = _calculate_cost(response.usage.input_tokens, response.usage.output_tokens)
-#         session["total_cost"] += cost["total_cost"]
-#         _log_cost(session_id, "Domain Classification", cost, session["total_cost"],
-#                   f"domain={domain} | severity={severity}")
-#         return {"domain": domain, "severity": severity}
-
-#     except Exception as e:
-#         print(f"  ⚠ Classification error: {e}")
-#         return {"domain": "other", "severity": "medium"}
-
-
-# # ── CNN screenshot analysis ───────────────────────────────────────────────────
-
-# def analyze_screenshot(image_bytes: bytes, session_id: str, user_id: str) -> dict:
-#     session  = _get_session(session_id)
-#     filename = f"{user_id}_{session_id[:8]}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
-#     filepath = os.path.join(SCREENSHOT_DIR, filename)
-#     with open(filepath, 'wb') as f:
-#         f.write(image_bytes)
-#     session["screenshot_path"] = filepath
-#     print(f"\n  📸 Screenshot saved: {filename}")
-
-#     cnn_label = "Screenshot uploaded"
-#     cnn_domain = None
-#     cnn_severity = None
-#     cnn_confidence = 0.0
-#     cnn_result = None
-
-#     try:
-#         from app.ml.cnn.predict import predict_screenshot
-#         cnn_result     = predict_screenshot(image_bytes)
-#         cnn_class      = cnn_result.get("error_class","general_error")
-#         cnn_confidence = cnn_result.get("confidence",0.0)
-#         cnn_domain     = CNN_CLASS_TO_DOMAIN.get(cnn_class,"other")
-#         cnn_severity   = CNN_CLASS_TO_SEVERITY.get(cnn_class,"medium")
-#         cnn_label      = CNN_CLASS_LABELS.get(cnn_class,cnn_class)
-#         session["cnn_result"] = cnn_result
-#         print(f"  🖼  CNN: {cnn_label} ({int(cnn_confidence*100)}%) → {cnn_domain}")
-#         if cnn_confidence >= 0.85 and cnn_domain != "other":
-#             session["domain"]   = cnn_domain
-#             session["severity"] = cnn_severity
-#     except Exception as e:
-#         print(f"  ⚠ CNN error: {e}")
-
-#     if cnn_result and cnn_confidence >= 0.85:
-#         display_text = f"I can see this looks like a {cnn_label} ({int(cnn_confidence*100)}% confidence). Can you tell me more about what happened just before this appeared?"
-#     elif cnn_result and cnn_confidence >= 0.60:
-#         display_text = f"Your screenshot looks like it could be a {cnn_label}. Can you describe what happened?"
-#     else:
-#         display_text = "I have received your screenshot. Can you describe what is happening so I can help you better?"
-
-#     return {
-#         "success": True, "filename": filename, "display_text": display_text,
-#         "cnn_label": cnn_label, "cnn_confidence": round(cnn_confidence,4),
-#         "cnn_domain": cnn_domain, "cnn_severity": cnn_severity,
-#     }
-
-
-# # ── Main chat function ────────────────────────────────────────────────────────
-
-# def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMessageResponse:
-#     session_id = data.session_id or str(uuid.uuid4())
-#     session    = _get_session(session_id)
-
-#     session["messages"].append({"role":"user","content":data.message})
-#     session["attempt"] += 1
-#     attempt = session["attempt"]
-
-#     # Classify domain + severity
-#     full_text  = " ".join(m["content"] for m in session["messages"] if m["role"]=="user")
-#     classified = _classify_with_claude(full_text, session_id, session)
-#     if classified["domain"] != "other" or not session["domain"]:
-#         session["domain"] = classified["domain"]
-#     session["severity"] = classified["severity"]
-
-#     # Check if resolved
-#     resolved_phrases = ["fixed","works now","that worked","sorted","solved","issue resolved","its working","all good now"]
-#     if any(p in data.message.lower() for p in resolved_phrases):
-#         return ChatMessageResponse(
-#             session_id=session_id,
-#             reply="Glad that sorted it out. Feel free to reach out if anything else comes up.",
-#             intent=data.intent or "solve",
-#             detected_domain=session["domain"] or "other",
-#             detected_severity=session["severity"] or "medium",
-#             resolved=True, can_escalate=False, attempt_number=attempt,
-#         )
-
-#     # ── RAG: Search knowledge base for relevant docs ──────────────────────────
-#     rag_context = ""
-#     rag_hits    = []
-#     try:
-#         from app.services.knowledge_service import get_rag_context, search_knowledge
-#         rag_context = get_rag_context(
-#             query=full_text,
-#             domain=session["domain"] if session["domain"] != "other" else None,
-#             n_results=3,
-#         )
-#         if rag_context:
-#             # Also store top hit info for response
-#             kb_result = search_knowledge(
-#                 query=full_text,
-#                 n_results=2,
-#                 domain=session["domain"] if session["domain"] != "other" else None,
-#             )
-#             rag_hits = [r for r in kb_result.get("results",[]) if r["cosine_similarity"] >= 45]
-#             print(f"  📖 RAG: found {len(rag_hits)} relevant KB articles (top: {rag_hits[0]['cosine_similarity']}% match)" if rag_hits else "  📖 RAG: no relevant KB articles found")
-#     except Exception as e:
-#         print(f"  ⚠ RAG error: {e}")
-
-#     # CNN context
-#     cnn_context = ""
-#     if session.get("cnn_result"):
-#         cr = session["cnn_result"]
-#         cc = cr.get("confidence",0.0)
-#         if cc >= 0.60:
-#             cnn_context = f"\n\nNote: User uploaded a screenshot. CNN detected: {CNN_CLASS_LABELS.get(cr.get('error_class',''), cr.get('error_class',''))} ({int(cc*100)}% confidence)."
-
-#     intent_note = (
-#         "This is a service request."
-#         if data.intent == "service_request"
-#         else f"This is attempt {attempt}. {'Tell the user you recommend raising a support ticket.' if attempt >= 3 else ''}"
-#     )
-
-#     try:
-#         response = _client.messages.create(
-#             model="claude-sonnet-4-5",
-#             max_tokens=512,
-#             system=f"{SYSTEM_PROMPT}\n\n{intent_note}{cnn_context}{rag_context}",
-#             messages=session["messages"],
-#         )
-#         reply_text = response.content[0].text.strip()
-#         cost = _calculate_cost(response.usage.input_tokens, response.usage.output_tokens)
-#         session["total_cost"] += cost["total_cost"]
-#         _log_cost(session_id,"Main Response",cost,session["total_cost"],
-#                   f"attempt={attempt} | domain={session['domain']} | RAG hits={len(rag_hits)}")
-
-#         session["messages"].append({"role":"assistant","content":reply_text})
-
-#         escalation_hints = ["raise a ticket","support ticket","human engineer","engineer will","escalat","take over"]
-#         can_escalate = attempt >= 3 and any(h in reply_text.lower() for h in escalation_hints)
-
-#         return ChatMessageResponse(
-#             session_id=session_id, reply=reply_text,
-#             intent=data.intent or "solve",
-#             detected_domain=session["domain"],
-#             detected_severity=session["severity"],
-#             resolved=False, can_escalate=can_escalate, attempt_number=attempt,
-#         )
-
-#     except Exception as e:
-#         print(f"\n⚠ Claude error: {e}")
-#         return ChatMessageResponse(
-#             session_id=session_id,
-#             reply="Having a temporary issue on my end. Please try again in a moment.",
-#             intent=data.intent or "solve",
-#             detected_domain=session["domain"] or "other",
-#             detected_severity=session["severity"] or "medium",
-#             resolved=False, can_escalate=False, attempt_number=attempt,
-#         )
-
-
-# # ── Ticket number ─────────────────────────────────────────────────────────────
-
-# def _generate_ticket_number(db: Session) -> str:
-#     max_t = db.query(func.max(Ticket.ticket_number)).scalar()
-#     if max_t:
-#         try: return f"T-{str(int(max_t.split('-')[1])+1).zfill(4)}"
-#         except: pass
-#     return f"T-{str(db.query(Ticket).count()+1001).zfill(4)}"
-
-
-# # ── Routing engine ────────────────────────────────────────────────────────────
-
-# def _find_best_engineer(db: Session, domain: TicketDomain, user_timezone: str = "UTC") -> Optional[str]:
-#     engineers = db.query(Engineer, User).join(User, Engineer.user_id == User.id).filter(
-#         Engineer.is_activated == True, User.is_active == True,
-#         Engineer.availability_status == AvailabilityStatus.AVAILABLE,
-#     ).all()
-#     if not engineers: return None
-#     best, best_score = None, -999
-#     for eng, usr in engineers:
-#         score = 0
-#         domain_val = domain.value if hasattr(domain, "value") else str(domain).lower()
-#         if domain_val in (eng.domain_expertise or []): score += 10
-#         try:
-#             user_tz = pytz.timezone(user_timezone); eng_tz = pytz.timezone(eng.timezone)
-#             now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
-#             tz_diff = abs(user_tz.utcoffset(now_utc).total_seconds() - eng_tz.utcoffset(now_utc).total_seconds()) / 3600
-#             if tz_diff == 0: score += 5
-#             elif tz_diff <= 3: score += 3
-#             elif tz_diff <= 6: score += 1
-#         except: pass
-#         score -= eng.active_ticket_count
-#         if score > best_score: best_score = score; best = usr.id
-#     return best
-
-
-# # ── Escalate ──────────────────────────────────────────────────────────────────
-
-# def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> EscalateResponse:
-#     session         = _sessions.get(data.session_id, {})
-#     severity        = session.get("severity","medium")
-#     screenshot_path = session.get("screenshot_path")
-#     cnn_result      = session.get("cnn_result") or {}  # guard against None when no screenshot uploaded
-#     engineer_user_id = _find_best_engineer(db, data.domain, user.timezone or "UTC")
-
-#     priority_map = {"critical":TicketPriority.CRITICAL,"high":TicketPriority.HIGH,"medium":TicketPriority.MEDIUM,"low":TicketPriority.LOW}
-#     sla_map      = {"critical":30,"high":120,"medium":480,"low":1440}
-
-#     ai_diagnosis = ""
-#     messages     = session.get("messages",[])
-#     ai_msgs      = [m["content"] for m in messages if m["role"]=="assistant"]
-#     if ai_msgs: ai_diagnosis = ai_msgs[-1][:500]
-#     if cnn_result.get("error_class"):
-#         ai_diagnosis += f"\n\nCNN Screenshot Detection: {CNN_CLASS_LABELS.get(cnn_result['error_class'],cnn_result['error_class'])} ({int(cnn_result.get('confidence',0)*100)}% confidence)"
-
-#     cnn_image_result = None
-#     if screenshot_path:
-#         cnn_image_result = os.path.basename(screenshot_path)
-#         if cnn_result.get("error_class"):
-#             cnn_image_result += f" | {CNN_CLASS_LABELS.get(cnn_result['error_class'],cnn_result['error_class'])} ({int(cnn_result.get('confidence',0)*100)}%)"
-
-#     # ── Complexity prediction ─────────────────────────────────────────────────
-#     import json as _json
-#     import asyncio
-#     ticket_text = f"{data.title} {data.description}"
-#     model_predictions = {}
-#     complexity_result = "moderate"
-#     try:
-#         from app.ml.complexity_verdict import claude_verify_complexity, generate_model_predictions
-#         try:
-#             import httpx as _httpx
-#             key = settings.ANTHROPIC_API_KEY
-#             _resp = _httpx.post(
-#                 "https://api.anthropic.com/v1/messages",
-#                 headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-#                 json={
-#                     "model": "claude-sonnet-4-5",
-#                     "max_tokens": 5,
-#                     "system": "Rate this IT ticket 2 or 3. 2=moderate. 3=complex/P1/outage/business halted/50+users. Reply with number only.",
-#                     "messages": [{"role": "user", "content": ticket_text[:800]}]
-#                 },
-#                 timeout=12.0
-#             )
-#             raw = _resp.json()["content"][0]["text"].strip()
-#             print(f"  🔍 Raw verdict: {repr(raw)}")
-#             claude_verdict = "complex" if "3" in raw else "moderate"
-#         except Exception as _e:
-#             print(f"  ⚠ Verdict error: {_e}")
-#             claude_verdict = "moderate"
-#         all_preds = generate_model_predictions(claude_verdict, ticket_text)
-#         model_predictions = all_preds
-#         complexity_result = all_preds.get("consensus", "moderate")
-#         print(f"  🧠 All Models: RNN={all_preds['models'].get('rnn',{}).get('complexity','?')} | LSTM={all_preds['models'].get('lstm',{}).get('complexity','?')} | GRU={all_preds['models'].get('gru',{}).get('complexity','?')} | BiLSTM={all_preds['models'].get('bilstm',{}).get('complexity','?')} | Consensus={complexity_result}")
-#     except Exception as e:
-#         print(f"  ⚠️  Prediction error: {e}")
-
-#     complexity_map = {"simple": TicketComplexity.SIMPLE, "moderate": TicketComplexity.MODERATE, "complex": TicketComplexity.COMPLEX}
-
-#     ticket = Ticket(
-#         ticket_number=_generate_ticket_number(db),
-#         user_id=user.id, engineer_id=engineer_user_id,
-#         title=data.title, description=data.description,
-#         domain=TicketDomain(str(data.domain).lower().replace("ticketdomain.", "")) if data.domain else TicketDomain.OTHER,
-#         priority=priority_map.get(severity,TicketPriority.MEDIUM),
-#         status=TicketStatus.OPEN,
-#         complexity=complexity_map.get(complexity_result, TicketComplexity.MODERATE),
-#         steps_tried=data.steps_tried,
-#         ai_diagnosis=ai_diagnosis.strip() or None,
-#         ai_attempted=True, cnn_image_result=cnn_image_result,
-#         user_city=user.city, user_country=user.country, user_timezone=user.timezone,
-#         sla_deadline=datetime.utcnow() + timedelta(minutes=sla_map.get(severity,480)),
-#         model_predictions=_json.dumps(model_predictions) if model_predictions else None,
-#     )
-#     db.add(ticket)
-#     if engineer_user_id:
-#         eng = db.query(Engineer).filter(Engineer.user_id==engineer_user_id).first()
-#         if eng: eng.active_ticket_count += 1
-#     db.commit(); db.refresh(ticket)
-
-#     print(f"\n  🎯 Ticket: {ticket.ticket_number} | Domain: {data.domain if isinstance(data.domain, str) else data.domain.value} | Engineer: {engineer_user_id or 'Unassigned'}\n")
-#     if data.session_id in _sessions: del _sessions[data.session_id]
-
-#     return EscalateResponse(
-#         ticket_id=ticket.id, ticket_number=ticket.ticket_number,
-#         message=f"Ticket {ticket.ticket_number} created and assigned to the best available engineer.",
-#     )
-
-
-# # ── User tickets ──────────────────────────────────────────────────────────────
-
-# def get_user_tickets(db: Session, user: User) -> list:
-#     return [_user_ticket_response(db,t) for t in
-#             db.query(Ticket).filter(Ticket.user_id==user.id).order_by(Ticket.created_at.desc()).all()]
-
-
-# def get_user_ticket(db: Session, user: User, ticket_id: str) -> UserTicketResponse:
-#     ticket = db.query(Ticket).filter(Ticket.id==ticket_id, Ticket.user_id==user.id).first()
-#     if not ticket: raise HTTPException(status_code=404, detail="Ticket not found")
-#     return _user_ticket_response(db, ticket)
-
-
-# def _user_ticket_response(db: Session, ticket: Ticket) -> UserTicketResponse:
-#     engineer_name=engineer_id_str=engineer_city=engineer_country=engineer_timezone=None
-#     if ticket.engineer_id:
-#         eng_user = db.query(User).filter(User.id==ticket.engineer_id).first()
-#         eng      = db.query(Engineer).filter(Engineer.user_id==ticket.engineer_id).first()
-#         if eng_user:
-#             engineer_name=eng_user.full_name;engineer_city=eng_user.city
-#             engineer_country=eng_user.country;engineer_timezone=eng_user.timezone
-#         if eng: engineer_id_str=eng.engineer_id
-#     return UserTicketResponse(
-#         id=ticket.id,ticket_number=ticket.ticket_number,
-#         title=ticket.title,domain=ticket.domain,
-#         priority=ticket.priority,status=ticket.status,
-#         engineer_name=engineer_name,engineer_id=engineer_id_str,
-#         engineer_city=engineer_city,engineer_country=engineer_country,
-#         engineer_timezone=engineer_timezone,
-#         created_at=ticket.created_at,updated_at=ticket.updated_at,
-#         resolved_at=ticket.resolved_at,
-#     )
-
-# File: backend/app/services/chat_service.py
+# Location: backend/app/services/chat_service.py
+#
+# CLEAN REWRITE — signal-based 4-phase flow, single Claude call, low latency
+#
+# PHASES:
+#   INTAKE  → AI asks questions until it says [READY_TO_SOLVE]
+#   SOLVE   → AI gives solutions, up to 3 attempts, then says [NEEDS_ENGINEER]
+#   TRIAGE  → Asset Q&A — real values from DB, pinpoints exact asset
+#   ESCALATE→ Ticket created, routed to asset owner or domain fallback
 
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from fastapi import HTTPException
 from datetime import datetime, timedelta
 from typing import Optional
 import uuid
 import json
+import re
 import pytz
 import os
 import anthropic
 
 from app.core.config import settings
 from app.models.user import User
-from app.models.ticket import Ticket, TicketStatus, TicketPriority, TicketComplexity, TicketDomain
+from app.models.ticket import Ticket, TicketStatus, TicketPriority, TicketDomain
 from app.models.engineer import Engineer, AvailabilityStatus
+from app.models.team import Team, TeamMember
 from app.schemas.chat import (
     ChatMessageRequest, ChatMessageResponse,
     EscalateRequest, EscalateResponse, UserTicketResponse,
 )
 
-_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-
-PRICE_INPUT_PER_MILLION  = 3.00
-PRICE_OUTPUT_PER_MILLION = 15.00
+_client    = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+_sessions: dict = {}
 
 SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "screenshots")
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 
-_sessions: dict = {}
-
 VALID_DOMAINS = [
-    "networking", "hardware", "software", "security",
-    "email_communication", "identity_access", "database",
-    "cloud", "infrastructure", "devops", "erp_business_apps",
-    "endpoint_management", "other",
+    "networking","hardware","software","security","email_communication",
+    "identity_access","database","cloud","infrastructure","devops",
+    "erp_business_apps","endpoint_management","other",
 ]
 
-# ── CNN mappings ──────────────────────────────────────────────────────────────
-CNN_CLASS_TO_DOMAIN = {
-    "bsod":"hardware","memory_error":"hardware","cpu_high":"infrastructure",
-    "disk_full":"infrastructure","hardware_failure":"hardware",
-    "dns_error":"networking","network_unreachable":"networking","vpn_error":"networking",
-    "ssl_error":"security","timeout":"networking","permission_denied":"security",
-    "login_failed":"identity_access","mfa_error":"identity_access","session_expired":"identity_access",
-    "app_crash":"software","update_error":"software","install_error":"software",
-    "dependency_error":"devops","db_connection_error":"database",
-    "db_query_error":"database","db_timeout":"database",
-    "cloud_auth_error":"cloud","deployment_error":"devops",
-    "container_error":"devops","general_error":"other",
-}
-CNN_CLASS_TO_SEVERITY = {
-    "bsod":"critical","memory_error":"high","cpu_high":"high","disk_full":"high",
-    "hardware_failure":"critical","dns_error":"high","network_unreachable":"critical",
-    "vpn_error":"high","ssl_error":"high","timeout":"medium","permission_denied":"high",
-    "login_failed":"medium","mfa_error":"medium","session_expired":"low",
-    "app_crash":"high","update_error":"medium","install_error":"medium",
-    "dependency_error":"medium","db_connection_error":"critical","db_query_error":"high",
-    "db_timeout":"high","cloud_auth_error":"high","deployment_error":"critical",
-    "container_error":"critical","general_error":"medium",
-}
-CNN_CLASS_LABELS = {
-    "bsod":"Windows Blue Screen of Death","memory_error":"Memory / Out of Memory Error",
-    "cpu_high":"High CPU Usage","disk_full":"Disk Full / Low Storage",
-    "hardware_failure":"Hardware Failure / Driver Error","dns_error":"DNS Resolution Failure",
-    "network_unreachable":"Network Unreachable / No Internet","vpn_error":"VPN Connection Error",
-    "ssl_error":"SSL / Certificate Error","timeout":"Connection / Request Timeout",
-    "permission_denied":"Permission Denied / Access Error","login_failed":"Login / Authentication Failed",
-    "mfa_error":"MFA / Two-Factor Auth Error","session_expired":"Session Expired",
-    "app_crash":"Application Crash / Not Responding","update_error":"Software Update Error",
-    "install_error":"Installation Failed","dependency_error":"Missing Dependency / Module Error",
-    "db_connection_error":"Database Connection Error","db_query_error":"Database Query / SQL Error",
-    "db_timeout":"Database Timeout","cloud_auth_error":"Cloud Permission / Auth Error",
-    "deployment_error":"Deployment / CI-CD Pipeline Error",
-    "container_error":"Container / Docker / Kubernetes Error","general_error":"General Error",
-}
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM PROMPT — single call, signal-based phase control
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── Prompts ───────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are an IT support specialist at NexusDesk.
 
-SYSTEM_PROMPT = """You are an IT support specialist at NexusDesk. Help users fix IT problems through friendly, clear conversation.
+STRICT FORMATTING:
+- Plain sentences only. No bullet points, no markdown, no asterisks, no dashes as bullets.
+- Under 120 words per response.
+- One question at a time.
+- Never start with "Certainly", "Absolutely", "Of course", "Great".
 
-STRICT FORMATTING RULES:
-- Never use asterisks, hashtags, dashes as bullets, or any markdown symbols
-- Write in plain natural sentences only
-- For steps write them as: First do this. Then do that. Finally do this.
-- Keep responses under 150 words
-- Sound like a helpful colleague, not a manual
-- Ask only one question at a time
-- Do not start with "Certainly!" or "Absolutely!"
+YOUR PHASES — follow in order:
 
-KNOWLEDGE BASE RULES:
-- If knowledge base articles are provided below, you MUST use them as your primary source of information.
-- Extract the specific steps, commands, and solutions from those articles and include them directly in your response.
-- Do not ignore the knowledge base content in favor of generic troubleshooting.
-- Do not say "according to the knowledge base" — just naturally give the specific advice.
+PHASE 1 — INTAKE:
+Ask focused questions one at a time to fully understand the problem before attempting any fix.
+Gather: what system/app, what error message, how long, who else is affected, what they tried.
+Keep asking until you have enough context to give a specific targeted solution.
+When ready to solve, end your reply with the signal: [READY_TO_SOLVE]
 
-After 2 failed attempts, tell the user naturally that you recommend getting an engineer involved and they can raise a support ticket.
+PHASE 2 — SOLVE:
+You now have context. Give ONE specific targeted solution per response.
+Each attempt must try something meaningfully different.
+After 3 failed solve attempts, end your reply with: [NEEDS_ENGINEER]
 
-If the user says it is fixed, say something brief and warm like "Glad that sorted it out."
+PHASE 3 — DO NOT handle. The system will take over.
 
-You cover: networking, hardware, software, security, email, identity and access, databases, cloud, infrastructure, devops, ERP and business apps, endpoint management."""
+Also always end your reply with this on a new line:
+<meta>{"domain":"DOMAIN","severity":"SEVERITY"}</meta>
 
-CLASSIFY_PROMPT = """Classify this IT support conversation. Return only JSON.
+Domain: networking, hardware, software, security, email_communication, identity_access,
+        database, cloud, infrastructure, devops, erp_business_apps, endpoint_management, other
+Severity: critical (production/all users), high (user blocked), medium (degraded), low (question)
 
-Pick domain from this exact list only:
-networking, hardware, software, security, email_communication, identity_access, database, cloud, infrastructure, devops, erp_business_apps, endpoint_management, other
+If the user says something is fixed, reply warmly and briefly. End with <meta>{"domain":"...","severity":"low"}</meta>
 
-Pick severity:
-critical = production down or all users affected
-high = user completely blocked
-medium = degraded or intermittent
-low = question or minor issue
-
-Return only: {"domain": "...", "severity": "..."}"""
+IMPORTANT: Never use [NEEDS_ENGINEER] on your own. The system will escalate automatically after 3 solve attempts. Just keep trying to help."""
 
 
-# ── Cost tracking ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# SESSION
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _calculate_cost(input_tokens: int, output_tokens: int) -> dict:
-    ic = (input_tokens  / 1_000_000) * PRICE_INPUT_PER_MILLION
-    oc = (output_tokens / 1_000_000) * PRICE_OUTPUT_PER_MILLION
-    return {"input_tokens":input_tokens,"output_tokens":output_tokens,
-            "input_cost":round(ic,6),"output_cost":round(oc,6),"total_cost":round(ic+oc,6)}
+def _get_session(sid: str) -> dict:
+    if sid not in _sessions:
+        _sessions[sid] = {
+            "messages":          [],
+            "phase":             "intake",   # intake → solve → triage → done
+            "solve_attempts":    0,
+            "domain":            None,
+            "severity":          None,
+            "problem":           "",
 
-
-def _log_cost(session_id: str, call_type: str, cost: dict, session_total: float, info: str = "") -> None:
-    print(f"\n{'─'*58}")
-    print(f"  NexusDesk — {call_type}")
-    print(f"{'─'*58}")
-    print(f"  Session : {session_id[:20]}...")
-    if info: print(f"  Info    : {info}")
-    print(f"  Input   : {cost['input_tokens']:,} tokens → ${cost['input_cost']:.6f}")
-    print(f"  Output  : {cost['output_tokens']:,} tokens → ${cost['output_cost']:.6f}")
-    print(f"  Call $  : ${cost['total_cost']:.6f}")
-    print(f"  Total $ : ${session_total:.6f}")
-    print(f"{'─'*58}\n")
-
-
-# ── Session management ────────────────────────────────────────────────────────
-
-def _get_session(session_id: str) -> dict:
-    if session_id not in _sessions:
-        _sessions[session_id] = {
-            "messages": [], "domain": None, "severity": None,
-            "attempt": 0, "total_cost": 0.0,
-            "screenshot_path": None, "cnn_result": None,
+            # Triage state
+            "triage_active":     False,
+            "triage_questions":  [],
+            "triage_q_index":    0,
+            "triage_answers":    [],
+            "triage_filters":    {},
+            "triage_rows":       [],        # candidate asset rows from DB
+            "asset_match":       None,
+            "asset_confirmed":   False,
+            "asset_context":     {},
+            "user_wants_escalate": False,
+            "triage_started":     False,
         }
-    return _sessions[session_id]
+    return _sessions[sid]
 
 
-# ── Domain classifier ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# SINGLE CLAUDE CALL
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _classify_with_claude(text: str, session_id: str, session: dict) -> dict:
-    try:
-        response = _client.messages.create(
-            model="claude-sonnet-4-5", max_tokens=120,
-            system=CLASSIFY_PROMPT,
-            messages=[{"role":"user","content":text}],
+def _call_claude(session: dict, phase_hint: str = "") -> tuple:
+    """
+    One API call. Returns (clean_reply, domain, severity, signals).
+    signals: set of strings like {'READY_TO_SOLVE', 'NEEDS_ENGINEER'}
+    """
+    system = SYSTEM_PROMPT
+    if phase_hint:
+        system += f"\n\nCURRENT PHASE HINT: {phase_hint}"
+
+    resp = _client.messages.create(
+        model      = "claude-sonnet-4-5",
+        max_tokens = 350,
+        system     = system,
+        messages   = session["messages"],
+    )
+    raw = resp.content[0].text.strip()
+
+    # Extract signals
+    signals = set()
+    if "[READY_TO_SOLVE]" in raw: signals.add("READY_TO_SOLVE")
+    if "[NEEDS_ENGINEER]" in raw:  signals.add("NEEDS_ENGINEER")
+
+    # Extract meta
+    domain   = session.get("domain") or "other"
+    severity = session.get("severity") or "medium"
+    m = re.search(r'<meta>(.*?)</meta>', raw, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(1).strip())
+            d = data.get("domain", "other")
+            s = data.get("severity", "medium")
+            if d in VALID_DOMAINS: domain   = d
+            if s in ["critical","high","medium","low"]: severity = s
+        except Exception:
+            pass
+
+    # Clean reply
+    clean = re.sub(r'\[READY_TO_SOLVE\]|\[NEEDS_ENGINEER\]', '', raw)
+    clean = re.sub(r'\s*<meta>.*?</meta>', '', clean, flags=re.DOTALL).strip()
+
+    return clean, domain, severity, signals
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRIAGE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _start_triage(db: Session, session: dict, sid: str) -> ChatMessageResponse:
+    """Fetch real assets, generate targeted questions, start Q&A."""
+    from app.services.asset_identifier_service import generate_questions, fetch_assets
+
+    domain  = session["domain"] or "other"
+    problem = session["problem"]
+
+    # Fetch candidate rows — stored in session for use during answer matching
+    rows, _ = fetch_assets(db, domain, problem)
+    session["triage_rows"] = rows
+
+    # Generate questions based on actual asset data
+    questions = generate_questions(db, domain, problem)
+
+    session["triage_active"]    = True
+    session["triage_questions"] = questions
+    session["triage_q_index"]   = 1
+    session["triage_answers"]   = []
+    session["triage_filters"]   = {}
+    session["asset_match"]      = None
+    session["asset_confirmed"]  = False
+
+    reply = (
+        "Before I raise a ticket I need a couple of quick details "
+        "to route this to exactly the right person.\n\n"
+        + questions[0]
+    )
+
+    return ChatMessageResponse(
+        session_id        = sid,
+        reply             = reply,
+        intent            = "context_gathering",
+        detected_domain   = domain,
+        detected_severity = session["severity"] or "medium",
+        resolved          = False,
+        can_escalate      = False,
+        attempt_number    = session["solve_attempts"],
+        context_gathering = True,
+    )
+
+
+def _handle_triage_answer(db: Session, session: dict, sid: str, answer: str) -> ChatMessageResponse:
+    """Process one triage answer, run match, ask next question or confirm."""
+    from app.services.asset_identifier_service import (
+        extract_field_from_answer,
+        progressive_match,
+    )
+
+    qi        = session["triage_q_index"]
+    questions = session["triage_questions"]
+    rows      = session["triage_rows"]
+
+    # Map answer to a column+value
+    if qi > 0 and qi <= len(questions):
+        prev_q = questions[qi - 1]
+        session["triage_answers"].append(answer)
+
+        extracted = extract_field_from_answer(prev_q, answer, rows)
+        col = extracted.get("column")
+        val = extracted.get("value")
+        if col and val:
+            session["triage_filters"][col] = val
+            session["asset_context"][col]  = val
+            print(f"  [Triage] Filter: {col}={val}")
+
+    # Check match
+    if session["triage_filters"]:
+        result = progressive_match(db, session["triage_filters"], rows)
+        session["asset_match"] = result.get("matched")
+        candidates             = result.get("candidates", 0)
+
+        print(f"  [Triage] Candidates: {candidates} confident={result['confident']}")
+
+        if result["confident"]:
+            session["asset_confirmed"] = True
+            session["triage_active"]   = False
+            asset = result["matched"]
+            name  = asset.get("identifier") or "the asset"
+            env   = asset.get("environment") or ""
+            team  = asset.get("team") or ""
+            reply = (
+                f"Found it. This is {name}"
+                + (f" in the {env} environment" if env else "")
+                + (f", owned by {team}" if team else "")
+                + ". Go ahead and raise the ticket."
+            )
+            return ChatMessageResponse(
+                session_id        = sid,
+                reply             = reply,
+                intent            = "ready_to_escalate",
+                detected_domain   = session["domain"] or "other",
+                detected_severity = session["severity"] or "medium",
+                resolved          = False,
+                can_escalate      = True,
+                attempt_number    = session["solve_attempts"],
+                context_gathering = False,
+            )
+
+    # More questions?
+    if qi < len(questions):
+        next_q = questions[qi]
+        session["triage_q_index"] += 1
+        candidates = len([
+            r for r in rows
+            if all(v.lower() in str(r.get(c,"")).lower() for c,v in session["triage_filters"].items())
+        ]) if session["triage_filters"] else len(rows)
+
+        hint = f" ({candidates} possible matches)" if candidates > 1 else ""
+        return ChatMessageResponse(
+            session_id        = sid,
+            reply             = next_q + hint,
+            intent            = "context_gathering",
+            detected_domain   = session["domain"] or "other",
+            detected_severity = session["severity"] or "medium",
+            resolved          = False,
+            can_escalate      = False,
+            attempt_number    = session["solve_attempts"],
+            context_gathering = True,
         )
-        raw = response.content[0].text.strip()
 
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
+    # All questions done
+    session["triage_active"] = False
+    asset = session.get("asset_match")
+    if asset:
+        name  = asset.get("identifier") or "the asset"
+        reply = f"Thanks. I found {name}. The ticket will be routed to the right team. Raise it now."
+    else:
+        reply = "Thanks for the details. I have enough to route this to the right team. Raise the ticket now."
 
-        start = raw.find("{")
-        end   = raw.rfind("}") + 1
-        if start == -1 or end == 0:
-            raise ValueError(f"No JSON found in: {raw!r}")
-        raw = raw[start:end]
+    return ChatMessageResponse(
+        session_id        = sid,
+        reply             = reply,
+        intent            = "ready_to_escalate",
+        detected_domain   = session["domain"] or "other",
+        detected_severity = session["severity"] or "medium",
+        resolved          = False,
+        can_escalate      = True,
+        attempt_number    = session["solve_attempts"],
+        context_gathering = False,
+    )
 
-        data     = json.loads(raw)
-        domain   = data.get("domain", "other")
-        severity = data.get("severity", "medium")
-        if domain not in VALID_DOMAINS:                        domain = "other"
-        if severity not in ["critical","high","medium","low"]: severity = "medium"
 
-        cost = _calculate_cost(response.usage.input_tokens, response.usage.output_tokens)
-        session["total_cost"] += cost["total_cost"]
-        _log_cost(session_id, "Domain Classification", cost, session["total_cost"],
-                  f"domain={domain} | severity={severity}")
-        return {"domain": domain, "severity": severity}
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN PROCESS MESSAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMessageResponse:
+    sid     = data.session_id or str(uuid.uuid4())
+    session = _get_session(sid)
+
+    # Store problem on first message
+    if not session["problem"] and data.message:
+        session["problem"] = data.message[:400]
+
+    # Triage Q&A active
+    if session["triage_active"]:
+        return _handle_triage_answer(db, session, sid, data.message)
+
+    # User asking to escalate — noted but we still complete the solve phase
+    user_escalate = any(p in data.message.lower() for p in [
+        "please escalate", "escalate this", "escalate now", "just escalate",
+        "raise a ticket", "send an engineer", "need an engineer",
+        "cant fix", "nothing works", "please just send",
+    ])
+    if user_escalate:
+        session["user_wants_escalate"] = True
+
+    # Append user message
+    session["messages"].append({"role": "user", "content": data.message})
+
+    # Resolved check
+    if any(p in data.message.lower() for p in ["fixed","works now","that worked","sorted","solved","all good"]):
+        session["messages"].append({"role": "assistant", "content": "Glad that sorted it out."})
+        return ChatMessageResponse(
+            session_id        = sid,
+            reply             = "Glad that sorted it out. Feel free to reach out if anything else comes up.",
+            intent            = "solve",
+            detected_domain   = session["domain"] or "other",
+            detected_severity = session["severity"] or "medium",
+            resolved          = True,
+            can_escalate      = False,
+            attempt_number    = session["solve_attempts"],
+            context_gathering = False,
+        )
+
+    # Phase hint for Claude
+    user_wants_escalate = session.get("user_wants_escalate", False)
+
+    if session["phase"] == "intake":
+        if user_wants_escalate:
+            hint = "PHASE 1 INTAKE: The user is urgently requesting escalation. You have enough context now. Acknowledge their urgency briefly, then end your reply with [READY_TO_SOLVE] immediately — do not ask more questions."
+        else:
+            hint = "PHASE 1 INTAKE: Ask questions to understand the problem. Do NOT give solutions yet. When you have enough context, end with [READY_TO_SOLVE]."
+    elif session["phase"] == "solve":
+        session["solve_attempts"] += 1
+        n = session["solve_attempts"]
+        if user_wants_escalate and n < 3:
+            hint = f"PHASE 2 SOLVE: The user wants to escalate but try attempt {n} of 3 first. Acknowledge urgency briefly then give one specific targeted fix. There are {3 - n} attempts remaining after this."
+        elif n >= 3:
+            hint = f"PHASE 2 SOLVE: Final attempt 3 of 3. Give your best remaining solution. After this the system will automatically escalate to an engineer."
+        else:
+            hint = f"PHASE 2 SOLVE: Attempt {n} of 3. Give one specific targeted solution. Do not suggest escalation."
+    else:
+        hint = ""
+
+    try:
+        reply, domain, severity, signals = _call_claude(session, hint)
+
+        session["domain"]   = domain
+        session["severity"] = severity
+        session["messages"].append({"role": "assistant", "content": reply})
+
+        # Phase transitions
+        print(f"  [Chat] Phase={session['phase']} attempts={session['solve_attempts']} signals={signals}")
+        if "READY_TO_SOLVE" in signals and session["phase"] == "intake":
+            session["phase"] = "solve"
+            print(f"  [Chat] Phase: intake → solve")
+        # Force transition to solve after 3 intake messages even without signal
+        elif session["phase"] == "intake" and len([m for m in session["messages"] if m["role"] == "user"]) >= 3:
+            session["phase"] = "solve"
+            print(f"  [Chat] Phase: intake → solve (forced after 3 user messages)")
+
+        # After exactly 3 solve attempts → start triage (only once)
+        if session["phase"] == "solve" and session["solve_attempts"] >= 3 and not session.get("triage_started"):
+            session["phase"]          = "triage"
+            session["triage_started"] = True
+            print(f"  [Chat] Phase: solve → triage after 3 attempts")
+            # Return Claude reply + immediately trigger first triage question
+            triage_response = _start_triage(db, session, sid)
+            # Combine Claude's final solve reply with the first triage question
+            combined_reply = reply + "" + triage_response.reply
+            return ChatMessageResponse(
+                session_id        = sid,
+                reply             = combined_reply,
+                intent            = "context_gathering",
+                detected_domain   = domain,
+                detected_severity = severity,
+                resolved          = False,
+                can_escalate      = False,
+                attempt_number    = session["solve_attempts"],
+                context_gathering = True,
+            )
+
+        return ChatMessageResponse(
+            session_id        = sid,
+            reply             = reply,
+            intent            = "solve",
+            detected_domain   = domain,
+            detected_severity = severity,
+            resolved          = False,
+            can_escalate      = False,
+            attempt_number    = session["solve_attempts"],
+            context_gathering = False,
+        )
 
     except Exception as e:
-        print(f"  ⚠ Classification error: {e}")
-        return {"domain": "other", "severity": "medium"}
+        print(f"  [Chat] Claude error: {e}")
+        return ChatMessageResponse(
+            session_id        = sid,
+            reply             = "Something went wrong. Please try again in a moment.",
+            intent            = "solve",
+            detected_domain   = session["domain"] or "other",
+            detected_severity = session["severity"] or "medium",
+            resolved          = False,
+            can_escalate      = False,
+            attempt_number    = session["solve_attempts"],
+            context_gathering = False,
+        )
 
 
-# ── CNN screenshot analysis ───────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# SCREENSHOT
+# ─────────────────────────────────────────────────────────────────────────────
 
 def analyze_screenshot(image_bytes: bytes, session_id: str, user_id: str) -> dict:
     session  = _get_session(session_id)
     filename = f"{user_id}_{session_id[:8]}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png"
     filepath = os.path.join(SCREENSHOT_DIR, filename)
-    with open(filepath, 'wb') as f:
+    with open(filepath, "wb") as f:
         f.write(image_bytes)
     session["screenshot_path"] = filepath
-    print(f"\n  📸 Screenshot saved: {filename}")
-
-    cnn_label      = "Screenshot uploaded"
-    cnn_domain     = None
-    cnn_severity   = None
-    cnn_confidence = 0.0
-    cnn_result     = None
-
-    try:
-        from app.ml.cnn.predict import predict_screenshot
-        cnn_result     = predict_screenshot(image_bytes)
-        cnn_class      = cnn_result.get("error_class","general_error")
-        cnn_confidence = cnn_result.get("confidence",0.0)
-        cnn_domain     = CNN_CLASS_TO_DOMAIN.get(cnn_class,"other")
-        cnn_severity   = CNN_CLASS_TO_SEVERITY.get(cnn_class,"medium")
-        cnn_label      = CNN_CLASS_LABELS.get(cnn_class,cnn_class)
-        session["cnn_result"] = cnn_result
-        print(f"  🖼  CNN: {cnn_label} ({int(cnn_confidence*100)}%) → {cnn_domain}")
-        if cnn_confidence >= 0.85 and cnn_domain != "other":
-            session["domain"]   = cnn_domain
-            session["severity"] = cnn_severity
-    except Exception as e:
-        print(f"  ⚠ CNN error: {e}")
-
-    if cnn_result and cnn_confidence >= 0.85:
-        display_text = f"I can see this looks like a {cnn_label} ({int(cnn_confidence*100)}% confidence). Can you tell me more about what happened just before this appeared?"
-    elif cnn_result and cnn_confidence >= 0.60:
-        display_text = f"Your screenshot looks like it could be a {cnn_label}. Can you describe what happened?"
-    else:
-        display_text = "I have received your screenshot. Can you describe what is happening so I can help you better?"
-
     return {
-        "success": True, "filename": filename, "display_text": display_text,
-        "cnn_label": cnn_label, "cnn_confidence": round(cnn_confidence,4),
-        "cnn_domain": cnn_domain, "cnn_severity": cnn_severity,
+        "success":        True,
+        "filename":       filename,
+        "display_text":   "Screenshot received. Can you describe what you are seeing?",
+        "cnn_label":      None,
+        "cnn_confidence": 0.0,
+        "cnn_domain":     None,
+        "cnn_severity":   None,
     }
 
 
-# ── Main chat function ────────────────────────────────────────────────────────
-
-def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMessageResponse:
-    session_id = data.session_id or str(uuid.uuid4())
-    session    = _get_session(session_id)
-
-    session["messages"].append({"role":"user","content":data.message})
-    session["attempt"] += 1
-    attempt = session["attempt"]
-
-    full_text  = " ".join(m["content"] for m in session["messages"] if m["role"]=="user")
-    classified = _classify_with_claude(full_text, session_id, session)
-    if classified["domain"] != "other" or not session["domain"]:
-        session["domain"] = classified["domain"]
-    session["severity"] = classified["severity"]
-
-    resolved_phrases = ["fixed","works now","that worked","sorted","solved","issue resolved","its working","all good now"]
-    if any(p in data.message.lower() for p in resolved_phrases):
-        return ChatMessageResponse(
-            session_id=session_id,
-            reply="Glad that sorted it out. Feel free to reach out if anything else comes up.",
-            intent=data.intent or "solve",
-            detected_domain=session["domain"] or "other",
-            detected_severity=session["severity"] or "medium",
-            resolved=True, can_escalate=False, attempt_number=attempt,
-        )
-
-    rag_context = ""
-    rag_hits    = []
-    try:
-        from app.services.knowledge_service import get_rag_context, search_knowledge
-        rag_context = get_rag_context(
-            query=full_text,
-            domain=session["domain"] if session["domain"] != "other" else None,
-            n_results=3,
-        )
-        if rag_context:
-            kb_result = search_knowledge(
-                query=full_text,
-                n_results=2,
-                domain=session["domain"] if session["domain"] != "other" else None,
-            )
-            rag_hits = [r for r in kb_result.get("results",[]) if r["cosine_similarity"] >= 45]
-            print(f"  📖 RAG: found {len(rag_hits)} relevant KB articles (top: {rag_hits[0]['cosine_similarity']}% match)" if rag_hits else "  📖 RAG: no relevant KB articles found")
-    except Exception as e:
-        print(f"  ⚠ RAG error: {e}")
-
-    cnn_context = ""
-    if session.get("cnn_result"):
-        cr = session["cnn_result"]
-        cc = cr.get("confidence",0.0)
-        if cc >= 0.60:
-            cnn_context = f"\n\nNote: User uploaded a screenshot. CNN detected: {CNN_CLASS_LABELS.get(cr.get('error_class',''), cr.get('error_class',''))} ({int(cc*100)}% confidence)."
-
-    intent_note = (
-        "This is a service request."
-        if data.intent == "service_request"
-        else f"This is attempt {attempt}. {'Tell the user you recommend raising a support ticket.' if attempt >= 3 else ''}"
-    )
-
-    try:
-        response = _client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=512,
-            system=f"{SYSTEM_PROMPT}\n\n{intent_note}{cnn_context}{rag_context}",
-            messages=session["messages"],
-        )
-        reply_text = response.content[0].text.strip()
-        cost = _calculate_cost(response.usage.input_tokens, response.usage.output_tokens)
-        session["total_cost"] += cost["total_cost"]
-        _log_cost(session_id,"Main Response",cost,session["total_cost"],
-                  f"attempt={attempt} | domain={session['domain']} | RAG hits={len(rag_hits)}")
-
-        session["messages"].append({"role":"assistant","content":reply_text})
-
-        escalation_hints = ["raise a ticket","support ticket","human engineer","engineer will","escalat","take over"]
-        can_escalate = attempt >= 3 and any(h in reply_text.lower() for h in escalation_hints)
-
-        return ChatMessageResponse(
-            session_id=session_id, reply=reply_text,
-            intent=data.intent or "solve",
-            detected_domain=session["domain"],
-            detected_severity=session["severity"],
-            resolved=False, can_escalate=can_escalate, attempt_number=attempt,
-        )
-
-    except Exception as e:
-        print(f"\n⚠ Claude error: {e}")
-        return ChatMessageResponse(
-            session_id=session_id,
-            reply="Having a temporary issue on my end. Please try again in a moment.",
-            intent=data.intent or "solve",
-            detected_domain=session["domain"] or "other",
-            detected_severity=session["severity"] or "medium",
-            resolved=False, can_escalate=False, attempt_number=attempt,
-        )
-
-
-# ── Ticket number ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUTING
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _generate_ticket_number(db: Session) -> str:
     max_t = db.query(func.max(Ticket.ticket_number)).scalar()
     if max_t:
-        try: return f"T-{str(int(max_t.split('-')[1])+1).zfill(4)}"
+        try: return f"T-{str(int(max_t.split('-')[1]) + 1).zfill(4)}"
         except: pass
-    return f"T-{str(db.query(Ticket).count()+1001).zfill(4)}"
+    return f"T-{str(db.query(Ticket).count() + 1001).zfill(4)}"
 
 
-# ── Routing engine ────────────────────────────────────────────────────────────
+def _find_best_team(db: Session, domain: str, tz: str = "UTC") -> Optional[str]:
+    teams = db.query(Team).filter(Team.is_active == True).all()
+    if not teams: return None
+    best_id, best_score = None, -999
+    now = datetime.utcnow()
+    for t in teams:
+        score = 10 if domain in (t.domain_focus or []) else 0
+        try:
+            diff = abs(
+                pytz.timezone(tz).utcoffset(now).total_seconds() -
+                pytz.timezone(t.timezone or "UTC").utcoffset(now).total_seconds()
+            ) / 3600
+            score += 5 if diff == 0 else 3 if diff <= 3 else 1 if diff <= 6 else 0
+        except Exception: pass
+        score -= t.active_ticket_count
+        if score > best_score:
+            best_score = score
+            best_id    = t.id
+    return best_id
 
-def _find_best_engineer(
-    db: Session,
-    domain: TicketDomain,
-    user_timezone: str = "UTC",
-    user_city: str = ""
-) -> Optional[str]:
-    engineers = db.query(Engineer, User).join(User, Engineer.user_id == User.id).filter(
+
+def _find_best_engineer(db: Session, domain: str, tz: str = "UTC") -> Optional[str]:
+    engs = db.query(Engineer, User).join(User, Engineer.user_id == User.id).filter(
         Engineer.is_activated == True,
         User.is_active == True,
         Engineer.availability_status == AvailabilityStatus.AVAILABLE,
     ).all()
-    if not engineers: return None
-
-    best, best_score = None, -999
-    # Use naive datetime for correct utcoffset calculation
-    now_naive = datetime.utcnow()
-
-    for eng, usr in engineers:
-        score = 0
-
-        # Domain match — highest priority
-        domain_val = domain.value if hasattr(domain, "value") else str(domain).lower()
-        if domain_val in (eng.domain_expertise or []):
-            score += 10
-
-        # City match tiebreaker
-        if user_city and usr.city and usr.city.strip().lower() == user_city.strip().lower():
-            score += 2
-
-        # Timezone proximity — fixed with naive datetime
+    if not engs: return None
+    best_id, best_score = None, -999
+    now = datetime.utcnow()
+    for eng, usr in engs:
+        score = 10 if domain in (eng.domain_expertise or []) else 0
         try:
-            user_tz  = pytz.timezone(user_timezone)
-            eng_tz   = pytz.timezone(usr.timezone or "UTC")
-            user_off = user_tz.utcoffset(now_naive).total_seconds() / 3600
-            eng_off  = eng_tz.utcoffset(now_naive).total_seconds() / 3600
-            tz_diff  = abs(user_off - eng_off)
-            if tz_diff == 0:
-                score += 5
-            elif tz_diff <= 3:
-                score += 3
-            elif tz_diff <= 6:
-                score += 1
-        except Exception:
-            pass
-
-        # Workload penalty
+            diff = abs(
+                pytz.timezone(tz).utcoffset(now).total_seconds() -
+                pytz.timezone(usr.timezone or "UTC").utcoffset(now).total_seconds()
+            ) / 3600
+            score += 5 if diff == 0 else 3 if diff <= 3 else 1 if diff <= 6 else 0
+        except Exception: pass
         score -= eng.active_ticket_count
-
         if score > best_score:
             best_score = score
-            best = usr.id
+            best_id    = usr.id
+    return best_id
 
-    return best
 
-
-# ── Escalate ──────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ESCALATE
+# ─────────────────────────────────────────────────────────────────────────────
 
 def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> EscalateResponse:
-    session          = _sessions.get(data.session_id, {})
-    severity         = session.get("severity", "medium")
-    screenshot_path  = session.get("screenshot_path")
-    cnn_result       = session.get("cnn_result") or {}
+    session  = _sessions.get(data.session_id, {})
+    severity = session.get("severity", "medium")
+    asset    = session.get("asset_match")
+    context  = session.get("asset_context", {})
 
-    # ── Routing — now passes user city for tiebreaker ─────────────────────────
-    engineer_user_id = _find_best_engineer(
-        db,
-        data.domain,
-        user.timezone or "UTC",
-        user.city or ""
-    )
-
-    priority_map = {"critical":TicketPriority.CRITICAL,"high":TicketPriority.HIGH,"medium":TicketPriority.MEDIUM,"low":TicketPriority.LOW}
+    priority_map = {"critical":TicketPriority.CRITICAL,"high":TicketPriority.HIGH,
+                    "medium":TicketPriority.MEDIUM,"low":TicketPriority.LOW}
     sla_map      = {"critical":30,"high":120,"medium":480,"low":1440}
 
-    ai_diagnosis = ""
-    messages     = session.get("messages", [])
-    ai_msgs      = [m["content"] for m in messages if m["role"] == "assistant"]
-    if ai_msgs: ai_diagnosis = ai_msgs[-1][:500]
-    if cnn_result.get("error_class"):
-        ai_diagnosis += f"\n\nCNN Screenshot Detection: {CNN_CLASS_LABELS.get(cnn_result['error_class'],cnn_result['error_class'])} ({int(cnn_result.get('confidence',0)*100)}% confidence)"
+    # Build diagnosis
+    msgs       = session.get("messages", [])
+    ai_msgs    = [m["content"] for m in msgs if m["role"] == "assistant"]
+    diagnosis  = ai_msgs[-1][:500] if ai_msgs else ""
 
-    cnn_image_result = None
-    if screenshot_path:
-        cnn_image_result = os.path.basename(screenshot_path)
-        if cnn_result.get("error_class"):
-            cnn_image_result += f" | {CNN_CLASS_LABELS.get(cnn_result['error_class'],cnn_result['error_class'])} ({int(cnn_result.get('confidence',0)*100)}%)"
-
-    # ── Complexity prediction ─────────────────────────────────────────────────
-    import json as _json
-    ticket_text       = f"{data.title} {data.description}"
-    model_predictions = {}
-    complexity_result = "moderate"
-    try:
-        from app.ml.complexity_verdict import generate_model_predictions
-        import httpx as _httpx
-        key   = settings.ANTHROPIC_API_KEY
-        _resp = _httpx.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-sonnet-4-5",
-                "max_tokens": 5,
-                "system": "Rate this IT ticket 2 or 3. 2=moderate. 3=complex/P1/outage/business halted/50+users. Reply with number only.",
-                "messages": [{"role": "user", "content": ticket_text[:800]}]
-            },
-            timeout=12.0
+    if asset:
+        row = asset.get("row", {})
+        diagnosis += (
+            f"\n\nAsset Identified:"
+            f"\n  Asset:       {asset.get('identifier') or 'N/A'}"
+            f"\n  Environment: {asset.get('environment') or 'N/A'}"
+            f"\n  Team:        {asset.get('team') or 'N/A'}"
+            f"\n  Contact:     {asset.get('contact_email') or 'N/A'}"
+            f"\n  Manager:     {asset.get('manager_email') or 'N/A'}"
         )
-        raw = _resp.json()["content"][0]["text"].strip()
-        print(f"  🔍 Raw verdict: {repr(raw)}")
-        claude_verdict = "complex" if "3" in raw else "moderate"
-    except Exception as _e:
-        print(f"  ⚠ Verdict error: {_e}")
-        claude_verdict = "moderate"
 
-    try:
-        all_preds         = generate_model_predictions(claude_verdict, ticket_text)
-        model_predictions = all_preds
-        complexity_result = all_preds.get("consensus", "moderate")
-        print(f"  🧠 All Models: RNN={all_preds['models'].get('rnn',{}).get('complexity','?')} | LSTM={all_preds['models'].get('lstm',{}).get('complexity','?')} | GRU={all_preds['models'].get('gru',{}).get('complexity','?')} | BiLSTM={all_preds['models'].get('bilstm',{}).get('complexity','?')} | Consensus={complexity_result}")
-    except Exception as e:
-        print(f"  ⚠️  Prediction error: {e}")
+    if context:
+        qs = session.get("triage_questions", [])
+        an = session.get("triage_answers", [])
+        diagnosis += "\n\nUser answers:\n" + "\n".join(f"  {q} → {a}" for q, a in zip(qs, an))
 
-    complexity_map = {
-        "simple":   TicketComplexity.SIMPLE,
-        "moderate": TicketComplexity.MODERATE,
-        "complex":  TicketComplexity.COMPLEX
-    }
+    # Routing
+    domain_str  = str(data.domain).lower().replace("ticketdomain.", "") if data.domain else "other"
+    engineer_id = None
+    team_id     = None
+
+    contact_email = asset.get("contact_email", "") if asset else ""
+    manager_email = asset.get("manager_email", "") if asset else ""
+
+    print(f"  [Route] asset_match={asset}")
+    print(f"  [Route] contact_email={contact_email} manager_email={manager_email}")
+
+    # P1 — asset owner
+    if contact_email:
+        u = db.query(User).filter(User.email == contact_email).first()
+        if u and db.query(Engineer).filter(Engineer.user_id == u.id).first():
+            engineer_id = u.id
+            print(f"  [Route] Asset owner: {contact_email}")
+
+    # P2 — manager's team
+    if not engineer_id and manager_email:
+        u = db.query(User).filter(User.email == manager_email).first()
+        if u:
+            t = db.query(Team).filter(Team.manager_id == u.id).first()
+            if t:
+                team_id = t.id
+                print(f"  [Route] Manager team: {manager_email}")
+
+    # P3 — domain team
+    if not engineer_id and not team_id:
+        team_id = _find_best_team(db, domain_str, user.timezone or "UTC")
+        if team_id: print(f"  [Route] Domain team fallback")
+
+    # P4 — individual engineer
+    if not engineer_id and not team_id:
+        engineer_id = _find_best_engineer(db, domain_str, user.timezone or "UTC")
+        if engineer_id: print(f"  [Route] Engineer fallback")
 
     ticket = Ticket(
         ticket_number    = _generate_ticket_number(db),
         user_id          = user.id,
-        engineer_id      = engineer_user_id,
+        engineer_id      = engineer_id,
+        team_id          = team_id,
         title            = data.title,
         description      = data.description,
-        domain           = TicketDomain(str(data.domain).lower().replace("ticketdomain.", "")) if data.domain else TicketDomain.OTHER,
+        domain           = TicketDomain(domain_str) if domain_str in [d.value for d in TicketDomain] else TicketDomain.OTHER,
         priority         = priority_map.get(severity, TicketPriority.MEDIUM),
         status           = TicketStatus.OPEN,
-        complexity       = complexity_map.get(complexity_result, TicketComplexity.MODERATE),
         steps_tried      = data.steps_tried,
-        ai_diagnosis     = ai_diagnosis.strip() or None,
+        ai_diagnosis     = diagnosis.strip() or None,
         ai_attempted     = True,
-        cnn_image_result = cnn_image_result,
         user_city        = user.city,
         user_country     = user.country,
         user_timezone    = user.timezone,
         sla_deadline     = datetime.utcnow() + timedelta(minutes=sla_map.get(severity, 480)),
-        model_predictions= _json.dumps(model_predictions) if model_predictions else None,
     )
     db.add(ticket)
-    if engineer_user_id:
-        eng = db.query(Engineer).filter(Engineer.user_id == engineer_user_id).first()
-        if eng: eng.active_ticket_count += 1
+
+    if team_id:
+        t = db.query(Team).filter(Team.id == team_id).first()
+        if t: t.active_ticket_count += 1
+    if engineer_id:
+        e = db.query(Engineer).filter(Engineer.user_id == engineer_id).first()
+        if e: e.active_ticket_count += 1
+
     db.commit()
     db.refresh(ticket)
+    print(f"  [Ticket] {ticket.ticket_number} | {domain_str} | team={team_id} | eng={engineer_id}")
 
-    print(f"\n  🎯 Ticket: {ticket.ticket_number} | Domain: {data.domain if isinstance(data.domain, str) else data.domain.value} | Engineer: {engineer_user_id or 'Unassigned'}\n")
     if data.session_id in _sessions:
         del _sessions[data.session_id]
 
+    # Build response with routing info
+    eng_name = eng_email = eng_city = eng_tz = eng_id_str = None
+    t_name   = t_id_str = None
+    r_type   = r_reason = None
+
+    if engineer_id:
+        eu = db.query(User).filter(User.id == engineer_id).first()
+        eo = db.query(Engineer).filter(Engineer.user_id == engineer_id).first()
+        if eu:
+            eng_name  = eu.full_name
+            eng_email = eu.email
+            eng_city  = eu.city
+            eng_tz    = eu.timezone
+        if eo:
+            eng_id_str = eo.engineer_id
+        r_type   = "asset_owner"
+        r_reason = "Routed to the registered owner of this asset."
+    elif team_id:
+        to = db.query(Team).filter(Team.id == team_id).first()
+        if to:
+            t_name   = to.name
+            t_id_str = to.team_id
+        r_type   = "domain_team"
+        r_reason = "Routed to best matching team by domain and timezone."
+
     return EscalateResponse(
-        ticket_id     = ticket.id,
-        ticket_number = ticket.ticket_number,
-        message       = f"Ticket {ticket.ticket_number} created and assigned to the best available engineer.",
+        ticket_id         = ticket.id,
+        ticket_number     = ticket.ticket_number,
+        message           = f"Ticket {ticket.ticket_number} raised.",
+        routing_type      = r_type,
+        routing_reason    = r_reason,
+        engineer_name     = eng_name,
+        engineer_id       = eng_id_str,
+        engineer_email    = eng_email,
+        engineer_city     = eng_city,
+        engineer_timezone = eng_tz,
+        team_name         = t_name,
+        team_id           = t_id_str,
+        asset_instance    = asset.get("identifier") if asset else None,
+        asset_environment = asset.get("environment") if asset else None,
+        asset_team        = asset.get("team") if asset else None,
     )
 
 
-# ── User tickets ──────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# USER TICKETS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_user_tickets(db: Session, user: User) -> list:
-    return [_user_ticket_response(db, t) for t in
-            db.query(Ticket).filter(Ticket.user_id == user.id).order_by(Ticket.created_at.desc()).all()]
+    return [_ticket_resp(db, t) for t in
+            db.query(Ticket).filter(Ticket.user_id == user.id)
+            .order_by(Ticket.created_at.desc()).all()]
 
 
 def get_user_ticket(db: Session, user: User, ticket_id: str) -> UserTicketResponse:
-    ticket = db.query(Ticket).filter(Ticket.id == ticket_id, Ticket.user_id == user.id).first()
-    if not ticket: raise HTTPException(status_code=404, detail="Ticket not found")
-    return _user_ticket_response(db, ticket)
+    t = db.query(Ticket).filter(Ticket.id == ticket_id, Ticket.user_id == user.id).first()
+    if not t:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    return _ticket_resp(db, t)
 
 
-def _user_ticket_response(db: Session, ticket: Ticket) -> UserTicketResponse:
-    engineer_name = engineer_id_str = engineer_city = engineer_country = engineer_timezone = None
+def _ticket_resp(db: Session, ticket: Ticket) -> UserTicketResponse:
+    eng_name = eng_id = eng_city = eng_country = eng_tz = eng_email = None
+    team_name = team_id_str = team_manager_email = None
+
     if ticket.engineer_id:
-        eng_user = db.query(User).filter(User.id == ticket.engineer_id).first()
-        eng      = db.query(Engineer).filter(Engineer.user_id == ticket.engineer_id).first()
-        if eng_user:
-            engineer_name     = eng_user.full_name
-            engineer_city     = eng_user.city
-            engineer_country  = eng_user.country
-            engineer_timezone = eng_user.timezone
-        if eng:
-            engineer_id_str = eng.engineer_id
-    return UserTicketResponse(
-        id               = ticket.id,
-        ticket_number    = ticket.ticket_number,
-        title            = ticket.title,
-        domain           = ticket.domain,
-        priority         = ticket.priority,
-        status           = ticket.status,
-        engineer_name    = engineer_name,
-        engineer_id      = engineer_id_str,
-        engineer_city    = engineer_city,
-        engineer_country = engineer_country,
-        engineer_timezone= engineer_timezone,
-        created_at       = ticket.created_at,
-        updated_at       = ticket.updated_at,
-        resolved_at      = ticket.resolved_at,
-    )
+        eu = db.query(User).filter(User.id == ticket.engineer_id).first()
+        eo = db.query(Engineer).filter(Engineer.user_id == ticket.engineer_id).first()
+        if eu:
+            eng_name    = eu.full_name
+            eng_email   = eu.email
+            eng_city    = eu.city
+            eng_country = eu.country
+            eng_tz      = eu.timezone
+        if eo:
+            eng_id = eo.engineer_id
 
+    if ticket.team_id:
+        team = db.query(Team).filter(Team.id == ticket.team_id).first()
+        if team:
+            team_name   = team.name
+            team_id_str = team.team_id
+            # Get manager email
+            if team.manager_id:
+                mgr = db.query(User).filter(User.id == team.manager_id).first()
+                if mgr:
+                    team_manager_email = mgr.email
+    elif ticket.engineer_id:
+        # Find team through TeamMember
+        member = db.query(TeamMember).filter(TeamMember.user_id == ticket.engineer_id).first()
+        if member:
+            team = db.query(Team).filter(Team.id == member.team_id).first()
+            if team:
+                team_name   = team.name
+                team_id_str = team.team_id
+                if team.manager_id:
+                    mgr = db.query(User).filter(User.id == team.manager_id).first()
+                    if mgr:
+                        team_manager_email = mgr.email
+
+    return UserTicketResponse(
+        id                  = ticket.id,
+        ticket_number       = ticket.ticket_number,
+        title               = ticket.title,
+        domain              = ticket.domain,
+        priority            = ticket.priority,
+        status              = ticket.status,
+        engineer_name       = eng_name,
+        engineer_id         = eng_id,
+        engineer_email      = eng_email,
+        engineer_city       = eng_city,
+        engineer_country    = eng_country,
+        engineer_timezone   = eng_tz,
+        team_name           = team_name,
+        team_id             = team_id_str,
+        team_manager_email  = team_manager_email,
+        created_at          = ticket.created_at,
+        updated_at          = ticket.updated_at,
+        resolved_at         = ticket.resolved_at,
+    )

@@ -1,59 +1,61 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-.venv/
-venv/
-env/
-*.env
-
-# Node
-node_modules/
-.next/
-out/
-dist/
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Env files
+# Environment files - NEVER commit these
 .env
 .env.local
 .env.production
 .env.development
+.env*.local
 
-# OS
+# Python virtual environment
+itsupport-env/
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+.Python
+
+# Node modules
+node_modules/
+.npm
+
+# Next.js build output
+.next/
+out/
+build/
+
+# Uploads and user data
+backend/uploads/
+uploads/
+
+# ChromaDB local data
+backend/data/
+data/
+
+# Misc files
+all_dependencies.txt
+*.log
 .DS_Store
 Thumbs.db
+
+# Model files
+*.h5
+*.keras
+*.pt
+*.pth
+backend/model_graphs/
+
+# Test cache
+.pytest_cache/
+.coverage
 
 # IDE
 .vscode/
 .idea/
-
-# ML Models
-*.h5
-*.pt
-*.pth
-*.pkl
-*.bin
-faiss_index/
-
-# Uploads
-uploads/
-
-# Virtual environment
-itsupport-env/
-backend/itsupport-env/
-
-# Python cache
-__pycache__/
-*.pyc
-
-# Mac files
-.DS_Store
+backend/app/ml/cnn/data/
+backend/app/ml/models/
+backend/app/ml/*.h5
+backend/app/ml/*.keras

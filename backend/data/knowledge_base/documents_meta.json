@@ -42,5 +42,27 @@
     "uploaded_by_role": "engineer_auto",
     "chunk_count": 1,
     "created_at": "2026-04-24T16:50:44.632347"
+  },
+  "5911d993-3a63-4037-af7c-891940c6f1d3": {
+    "id": "5911d993-3a63-4037-af7c-891940c6f1d3",
+    "title": "AWS S3 Cross-Region Replication Failure and IAM Troubleshooting Guide",
+    "filename": "DOMAIN_ Cloud.txt",
+    "domain": "cloud",
+    "description": "",
+    "uploaded_by": "a5e9b33b-a8f7-453f-acfe-27d89278c634",
+    "uploaded_by_role": "admin",
+    "chunk_count": 3,
+    "created_at": "2026-05-04T14:32:00.903961"
+  },
+  "64a5f895-4897-439e-8fb4-8e648d561b26": {
+    "id": "64a5f895-4897-439e-8fb4-8e648d561b26",
+    "title": "Resolved: Cloud issue \u2014 4/5/2026",
+    "filename": "ticket_T-1005.txt",
+    "domain": "cloud",
+    "description": "Auto-indexed from resolved ticket T-1005",
+    "uploaded_by": "1c261b35-39e0-442e-b235-714eb30b64e2",
+    "uploaded_by_role": "engineer_auto",
+    "chunk_count": 1,
+    "created_at": "2026-05-04T14:34:06.921543"
   }
 }

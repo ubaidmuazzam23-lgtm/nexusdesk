@@ -1,4 +1,4 @@
-# File: backend/app/core/dependencies.py
+# Location: ./backend/app/core/dependencies.py
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -65,5 +65,11 @@ def require_user(current_user: User = Depends(get_current_user)) -> User:
 def require_engineer(current_user: User = Depends(get_current_user)) -> User:
     return require_role(UserRole.ENGINEER)(current_user)
 
+def require_manager(current_user: User = Depends(get_current_user)) -> User:
+    return require_role(UserRole.MANAGER)(current_user)
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return require_role(UserRole.ADMIN)(current_user)
+
+def require_manager_or_admin(current_user: User = Depends(get_current_user)) -> User:
+    return require_role(UserRole.MANAGER, UserRole.ADMIN)(current_user)

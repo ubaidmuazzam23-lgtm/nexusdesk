@@ -13,8 +13,9 @@ const navItems = [
     { href: '/admin/config',         label: 'Configuration',  icon: '◧' },
     { href: '/admin/audit-log',      label: 'Audit Log',      icon: '◪' },
     { href: '/admin/analytics',      label: 'Analytics',      icon: '◬' },
-    { href: '/admin/model-stats',    label: 'Model Stats',    icon: '◍' },
     { href: '/admin/routing-simulator', label: 'Routing Simulator' },
+    { href: '/admin/teams', label: 'Teams', icon: '' },
+    { href: '/admin/assets', label: 'Assets', icon: '◈' },
   ]
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {

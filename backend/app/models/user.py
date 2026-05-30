@@ -1,4 +1,4 @@
-# File: backend/app/models/user.py
+# Location: ./backend/app/models/user.py
 
 from sqlalchemy import Column, String, Boolean, DateTime, Enum
 from sqlalchemy.dialects.postgresql import UUID
@@ -10,9 +10,10 @@ from app.core.database import Base
 
 
 class UserRole(str, enum.Enum):
-    USER = "user"
+    USER     = "user"
     ENGINEER = "engineer"
-    ADMIN = "admin"
+    MANAGER  = "manager"
+    ADMIN    = "admin"
 
 
 class User(Base):
@@ -22,7 +23,7 @@ class User(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
     full_name = Column(String, nullable=False)
-    role = Column(Enum(UserRole), nullable=False, default=UserRole.USER)
+    role = Column(Enum(UserRole, values_callable=lambda x: [e.value for e in x]), nullable=False, default=UserRole.USER)
 
     # Status
     is_active = Column(Boolean, default=True)

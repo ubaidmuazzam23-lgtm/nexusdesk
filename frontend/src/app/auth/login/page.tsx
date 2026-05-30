@@ -1,5 +1,5 @@
+// Location: ./frontend/src/app/auth/login/page.tsx
 'use client'
-// File: frontend/src/app/auth/login/page.tsx
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
@@ -37,7 +37,6 @@ export default function LoginPage() {
       })
       const d = await r.json()
       if (!r.ok) {
-        // Redirect to activation if engineer hasn't activated
         if (d.detail === 'PENDING_ACTIVATION') {
           window.location.replace(`/auth/activate?email=${encodeURIComponent(form.email)}`)
           return
@@ -48,8 +47,11 @@ export default function LoginPage() {
       localStorage.setItem('refresh_token', d.refresh_token)
       localStorage.setItem('role', d.role)
       localStorage.setItem('full_name', d.full_name)
+      localStorage.setItem('email', d.email)
+      if (d.user_id) localStorage.setItem('user_id', d.user_id)
       if (d.role === 'admin') window.location.replace('/admin/overview')
       else if (d.role === 'engineer') window.location.replace('/engineer/dashboard')
+      else if (d.role === 'manager') window.location.replace('/manager/overview')
       else window.location.replace('/chat')
     } catch (err: any) {
       setError(err.message)
@@ -71,7 +73,10 @@ export default function LoginPage() {
       <div style={S.left}>
         <div style={{ position: 'absolute', bottom: '10%', left: '-10%', width: 500, height: 500, background: 'radial-gradient(circle, rgba(23,77,56,0.18) 0%, transparent 65%)', pointerEvents: 'none' }}/>
         <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: 10, textDecoration: 'none' }}>
-          <svg width="32" height="32" viewBox="0 0 32 32"><polygon points="16,2 30,9 30,23 16,30 2,23 2,9" fill="#174D38"/><circle cx="16" cy="16" r="4" fill="#4d9e78"/></svg>
+          <svg width="32" height="32" viewBox="0 0 32 32">
+            <polygon points="16,2 30,9 30,23 16,30 2,23 2,9" fill="#174D38"/>
+            <circle cx="16" cy="16" r="4" fill="#4d9e78"/>
+          </svg>
           <span style={{ fontFamily: 'Georgia, serif', fontSize: 22, fontWeight: 600, color: '#F2F2F2' }}>NexusDesk</span>
         </Link>
         <div>
@@ -82,9 +87,10 @@ export default function LoginPage() {
             Sign in to continue managing IT support at global scale.
           </p>
           {[
-            { role: 'User', color: '#174D38', desc: 'Chat with AI · Track tickets' },
-            { role: 'Engineer', color: '#555', desc: 'View queue · Resolve tickets' },
-            { role: 'Admin', color: '#4D1717', desc: 'Manage platform · Full control' },
+            { role: 'User',     color: '#174D38', desc: 'Chat with AI · Track tickets' },
+            { role: 'Engineer', color: '#555',    desc: 'View queue · Resolve tickets' },
+            { role: 'Manager',  color: '#5b3d8a', desc: 'Manage team · Assign tickets' },
+            { role: 'Admin',    color: '#4D1717', desc: 'Manage platform · Full control' },
           ].map((r, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 16px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: 4, marginBottom: 10 }}>
               <div style={{ width: 8, height: 8, borderRadius: '50%', background: r.color, flexShrink: 0 }}/>
@@ -104,8 +110,16 @@ export default function LoginPage() {
           <h1 style={{ fontFamily: 'Georgia, serif', fontSize: 36, fontWeight: 500, color: '#F2F2F2', marginBottom: 8 }}>Sign in</h1>
           <p style={{ fontSize: 14, color: 'rgba(242,242,242,0.35)', marginBottom: 32 }}>Your role is detected automatically.</p>
 
-          {success && <div style={{ padding: '12px 16px', background: 'rgba(23,77,56,0.15)', border: '1px solid rgba(23,77,56,0.3)', color: '#4d9e78', fontSize: 13, marginBottom: 24, borderRadius: 2 }}>{success}</div>}
-          {error && <div style={{ padding: '12px 16px', background: 'rgba(77,23,23,0.3)', border: '1px solid rgba(200,50,50,0.3)', color: '#f87171', fontSize: 13, marginBottom: 24, borderRadius: 2 }}>{error}</div>}
+          {success && (
+            <div style={{ padding: '12px 16px', background: 'rgba(23,77,56,0.15)', border: '1px solid rgba(23,77,56,0.3)', color: '#4d9e78', fontSize: 13, marginBottom: 24, borderRadius: 2 }}>
+              {success}
+            </div>
+          )}
+          {error && (
+            <div style={{ padding: '12px 16px', background: 'rgba(77,23,23,0.3)', border: '1px solid rgba(200,50,50,0.3)', color: '#f87171', fontSize: 13, marginBottom: 24, borderRadius: 2 }}>
+              {error}
+            </div>
+          )}
 
           <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             <div>
@@ -124,14 +138,12 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* Divider */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, margin: '28px 0' }}>
             <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.07)' }}/>
             <span style={{ fontSize: 11, color: 'rgba(242,242,242,0.2)', letterSpacing: '0.08em' }}>OR</span>
             <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.07)' }}/>
           </div>
 
-          {/* Activate account box */}
           <Link href="/auth/activate" style={{ display: 'block', padding: '16px 18px', background: 'rgba(23,77,56,0.08)', border: '1px solid rgba(23,77,56,0.25)', borderRadius: 4, textDecoration: 'none', marginBottom: 24, transition: 'border 0.2s' }}
             onMouseEnter={e => (e.currentTarget as HTMLElement).style.borderColor = 'rgba(23,77,56,0.5)'}
             onMouseLeave={e => (e.currentTarget as HTMLElement).style.borderColor = 'rgba(23,77,56,0.25)'}

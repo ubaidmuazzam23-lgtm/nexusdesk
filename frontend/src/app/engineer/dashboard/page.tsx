@@ -1,9 +1,9 @@
 'use client'
 // File: frontend/src/app/engineer/dashboard/page.tsx
+import { useState, useEffect, useCallback, useRef } from 'react'
 
-import { useState, useEffect, useCallback } from 'react'
-
-const API = process.env.NEXT_PUBLIC_API_URL
+const API    = process.env.NEXT_PUBLIC_API_URL
+const WS_URL = process.env.NEXT_PUBLIC_API_URL?.replace('http', 'ws') || 'ws://localhost:8000'
 
 interface Ticket {
   id: string; ticket_number: string; title: string; description: string
@@ -21,9 +21,18 @@ interface KBResult {
   content: string; title: string; doc_id: string
   domain: string; cosine_similarity: number; filename: string
 }
+interface TeamInfo {
+  team_id: string; name: string; domain_focus: string[]
+  region: string; timezone: string
+  manager_name: string; manager_email: string
+  member_count: number; role_in_team: string
+}
+interface ChatMessage {
+  id: string; message: string; sender_id: string
+  sender_name: string; sender_role: string
+  timestamp: string; type?: 'message' | 'system'; online_count?: number
+}
 
-const pColorVar = (p: string) =>
-  p === 'critical' ? 'var(--crit)' : p === 'high' ? 'var(--warn)' : p === 'medium' ? '#2a6bab' : 'var(--fg-mute)'
 const pPill = (p: string) =>
   p === 'critical' ? 'pill-crit' : p === 'high' ? 'pill-warn' : p === 'medium' ? 'pill-grn' : ''
 const sPill = (s: string) =>
@@ -53,7 +62,7 @@ function LiveClock({ tz, label }: { tz: string; label: string }) {
 }
 
 function ScreenshotImage({ url }: { url: string }) {
-  const [src, setSrc] = useState<string | null>(null)
+  const [src, setSrc]     = useState<string | null>(null)
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   useEffect(() => {
     let rev = ''; setState('loading'); setSrc(null)
@@ -70,26 +79,36 @@ function ScreenshotImage({ url }: { url: string }) {
 }
 
 export default function EngineerDashboardPage() {
-  const [tickets, setTickets]     = useState<Ticket[]>([])
-  const [stats, setStats]         = useState<Stats | null>(null)
-  const [loading, setLoading]     = useState(true)
-  const [theme, setTheme]         = useState('light')
-  const [selected, setSelected]   = useState<Ticket | null>(null)
-  const [tab, setTab]             = useState<'queue' | 'kb' | 'history'>('queue')
-  const [updating, setUpdating]   = useState(false)
-  const [notes, setNotes]         = useState('')
-  const [engTz, setEngTz]         = useState('UTC')
-  const [engName, setEngName]     = useState('')
-  const [engId, setEngId]         = useState('')
+  const [tickets,    setTickets]    = useState<Ticket[]>([])
+  const [stats,      setStats]      = useState<Stats | null>(null)
+  const [teamInfo,   setTeamInfo]   = useState<TeamInfo | null>(null)
+  const [loading,    setLoading]    = useState(true)
+  const [theme,      setTheme]      = useState('light')
+  const [selected,   setSelected]   = useState<Ticket | null>(null)
+  const [tab,        setTab]        = useState<'queue' | 'kb' | 'history' | 'chat'>('queue')
+  const [updating,   setUpdating]   = useState(false)
+  const [notes,      setNotes]      = useState('')
+  const [engTz,      setEngTz]      = useState('UTC')
+  const [engName,    setEngName]    = useState('')
+  const [engId,      setEngId]      = useState('')
   const [availability, setAvailability] = useState('available')
-  const [mounted, setMounted]     = useState(false)
-  const [kbResults, setKbResults] = useState<KBResult[]>([])
-  const [kbLoading, setKbLoading] = useState(false)
+  const [mounted,    setMounted]    = useState(false)
+  const [kbResults,  setKbResults]  = useState<KBResult[]>([])
+  const [kbLoading,  setKbLoading]  = useState(false)
   const [kbExpanded, setKbExpanded] = useState<number | null>(null)
-  const [kbSearch, setKbSearch]   = useState('')
+  const [kbSearch,   setKbSearch]   = useState('')
   const [kbSearchRes, setKbSearchRes] = useState<KBResult[]>([])
   const [kbSearching, setKbSearching] = useState(false)
-  const [toast, setToast]         = useState<{ title: string; desc: string; type: string } | null>(null)
+  const [toast,      setToast]      = useState<{ title: string; desc: string; type: string } | null>(null)
+
+  // Chat state
+  const [chatMessages,  setChatMessages]  = useState<ChatMessage[]>([])
+  const [chatInput,     setChatInput]     = useState('')
+  const [chatConnected, setChatConnected] = useState(false)
+  const [onlineCount,   setOnlineCount]   = useState(0)
+  const wsRef      = useRef<WebSocket | null>(null)
+  const chatBottom = useRef<HTMLDivElement>(null)
+  const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('user_id') || '' : ''
 
   const token = () => localStorage.getItem('access_token') || ''
   const hdrs  = useCallback(() => ({ Authorization: `Bearer ${token()}` }), [])
@@ -99,7 +118,7 @@ export default function EngineerDashboardPage() {
     setTheme(saved)
     document.documentElement.setAttribute('data-theme', saved)
     setMounted(true)
-    fetchProfile(); fetchData()
+    fetchProfile(); fetchData(); fetchTeamInfo()
     const i = setInterval(fetchData, 30000)
     return () => clearInterval(i)
   }, [])
@@ -108,6 +127,23 @@ export default function EngineerDashboardPage() {
     if (selected) fetchKB(selected)
     else setKbResults([])
   }, [selected])
+
+  // Connect/disconnect chat when switching to chat tab
+  useEffect(() => {
+    if (tab === 'chat' && teamInfo?.team_id) {
+      connectChat(teamInfo.team_id)
+    } else {
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
+      setChatConnected(false)
+    }
+    return () => {
+      if (tab !== 'chat' && wsRef.current) { wsRef.current.close(); wsRef.current = null }
+    }
+  }, [tab, teamInfo?.team_id])
+
+  useEffect(() => {
+    chatBottom.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatMessages])
 
   const toggleTheme = () => {
     const next = theme === 'light' ? 'dark' : 'light'
@@ -145,6 +181,51 @@ export default function EngineerDashboardPage() {
       if (tR.ok) setTickets(await tR.json())
       if (sR.ok) setStats(await sR.json())
     } catch {} finally { setLoading(false) }
+  }
+
+  const fetchTeamInfo = async () => {
+    try {
+      const r = await fetch(`${API}/api/v1/engineer/my-team`, { headers: hdrs() })
+      if (r.ok) setTeamInfo(await r.json())
+    } catch {}
+  }
+
+  const connectChat = async (teamId: string) => {
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
+    setChatMessages([]); setChatConnected(false)
+
+    // Load history
+    try {
+      const r = await fetch(`${API}/api/v1/teams/${teamId}/chat`, { headers: hdrs() })
+      if (r.ok) {
+        const history = await r.json()
+        setChatMessages(history.map((m: any) => ({ ...m, type: 'message' })))
+      }
+    } catch {}
+
+    const tk = localStorage.getItem('access_token') || ''
+    const ws = new WebSocket(`${WS_URL}/api/v1/teams/${teamId}/ws?token=${tk}`)
+    ws.onopen    = () => setChatConnected(true)
+    ws.onmessage = e => {
+      try {
+        const msg = JSON.parse(e.data)
+        if (msg.online_count !== undefined) setOnlineCount(msg.online_count)
+        setChatMessages(prev => [...prev, msg])
+      } catch {}
+    }
+    ws.onclose  = () => setChatConnected(false)
+    ws.onerror  = () => setChatConnected(false)
+    wsRef.current = ws
+  }
+
+  const sendChatMessage = () => {
+    if (!chatInput.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
+    wsRef.current.send(chatInput.trim())
+    setChatInput('')
+  }
+
+  const handleChatKey = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage() }
   }
 
   const fetchKB = async (ticket: Ticket) => {
@@ -210,15 +291,29 @@ export default function EngineerDashboardPage() {
     return `${API}/api/v1/chat/screenshot/${f}`
   }
 
-  // Format created_at in user's timezone
   const fmtTime = (iso: string, tz?: string) => {
     try {
       return new Date(iso).toLocaleString('en-US', {
-        timeZone: tz || 'UTC',
-        month: 'short', day: 'numeric', year: 'numeric',
+        timeZone: tz || 'UTC', month: 'short', day: 'numeric', year: 'numeric',
         hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
       })
     } catch { return iso }
+  }
+
+  const chatTime = (s: string) =>
+    new Date(s).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })
+
+  const roleColor = (role: string) => {
+    if (role === 'manager') return '#5b3d8a'
+    if (role === 'admin')   return 'var(--crit)'
+    return 'var(--grn)'
+  }
+
+  const getBubbleClass = (msg: ChatMessage) => {
+    if (msg.type === 'system')           return 'system'
+    if (msg.sender_id === currentUserId) return 'mine'
+    if (msg.sender_role === 'manager')   return 'manager-msg'
+    return 'other'
   }
 
   const openTickets     = tickets.filter(t => t.status !== 'resolved')
@@ -245,6 +340,7 @@ export default function EngineerDashboardPage() {
         .nav-item.active{background:rgba(255,255,255,.16);color:#fff;border-left-color:#fff;font-weight:500}
         .nav-badge{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:10px;color:rgba(255,255,255,.45);background:rgba(255,255,255,.1);padding:1px 7px;border-radius:10px}
         .nav-item.active .nav-badge{color:rgba(255,255,255,.85)}
+        .sb-team{padding:10px 16px;border-top:1px solid rgba(255,255,255,.08);border-bottom:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.1)}
         .sb-foot{margin-top:auto;border-top:1px solid rgba(255,255,255,.1);padding:12px 16px;display:flex;align-items:center;gap:10px}
         .av{width:28px;height:28px;border-radius:5px;display:grid;place-items:center;font-size:11px;font-weight:700;flex-shrink:0;color:#fff;background:rgba(255,255,255,.2)}
         .u-name{font-size:12px;font-weight:500;color:#fff;line-height:1.2}
@@ -292,8 +388,6 @@ export default function EngineerDashboardPage() {
         .st-opt.on-avail{background:var(--ok-w);color:var(--ok)}
         .st-opt.on-busy{background:var(--warn-w);color:var(--warn)}
         .st-opt.on-away{background:var(--crit-w);color:var(--crit)}
-        .chip{display:inline-flex;align-items:center;height:22px;padding:0 10px;border-radius:11px;background:var(--bg-sun);border:1px solid var(--brd);font-size:11px;color:var(--fg-dim);cursor:pointer;font-weight:500;transition:all .1s}
-        .chip:hover,.chip.on{border-color:var(--grn);color:var(--grn);background:var(--grn-w)}
         .mono{font-family:"JetBrains Mono",monospace}
         .muted{color:var(--fg-mute)}
         .small{font-size:11px}
@@ -303,8 +397,6 @@ export default function EngineerDashboardPage() {
         .trunc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .fade{animation:fade .25s ease-out both}
         @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
-        .upload-zone{border:1.5px dashed var(--brd);border-radius:6px;padding:18px;text-align:center;color:var(--fg-mute);cursor:pointer;transition:all .2s;margin:8px 0}
-        .upload-zone:hover{border-color:var(--grn);color:var(--grn);background:var(--grn-w)}
         .toast-tray{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:200;pointer-events:none}
         .toast{background:var(--bg-elev);border:1px solid var(--brd);border-radius:6px;padding:12px 16px;box-shadow:var(--shadow-pop);font-size:12px;pointer-events:auto;animation:tin .3s ease-out;display:flex;align-items:flex-start;gap:10px;min-width:300px}
         @keyframes tin{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
@@ -320,11 +412,32 @@ export default function EngineerDashboardPage() {
         .dot-ok{background:var(--ok)}.dot-warn{background:var(--warn)}.dot-crit{background:var(--crit)}.dot-grn{background:var(--grn)}
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
         .pulse{animation:pulse 1.8s ease-in-out infinite}
+        .chat-shell{display:flex;flex-direction:column;height:100%;overflow:hidden}
+        .chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;background:var(--bg-sun)}
+        .cmsg{display:flex;flex-direction:column;max-width:75%}
+        .cmsg.mine{align-self:flex-end;align-items:flex-end}
+        .cmsg.other{align-self:flex-start;align-items:flex-start}
+        .cmsg.system{align-self:center;align-items:center}
+        .cbubble{padding:8px 12px;border-radius:8px;font-size:12px;line-height:1.5;word-break:break-word}
+        .cbubble.mine{background:var(--grn);color:#fff;border-radius:8px 8px 2px 8px}
+        .cbubble.other{background:var(--bg-elev);border:1px solid var(--brd);border-radius:8px 8px 8px 2px}
+        .cbubble.manager-msg{background:#f0edf8;border:1px solid rgba(91,61,138,.15);border-radius:8px 8px 8px 2px}
+        [data-theme=dark] .cbubble.manager-msg{background:#1e1525;border-color:rgba(179,157,219,.15)}
+        .cbubble.system{background:transparent;color:var(--fg-mute);font-size:11px;font-style:italic;padding:2px 8px;border:none}
+        .cmeta{font-size:10px;color:var(--fg-mute);font-family:"JetBrains Mono",monospace;margin-bottom:3px}
+        .cts{font-size:10px;color:var(--fg-faint);font-family:"JetBrains Mono",monospace;margin-top:3px}
+        .chat-input-row{padding:10px 14px;border-top:1px solid var(--brd);display:flex;gap:8px;align-items:center;background:var(--bg-elev);flex-shrink:0}
+        .chat-inp{flex:1;padding:8px 14px;background:var(--bg-sun);border:1px solid var(--brd);color:var(--fg);font-family:inherit;font-size:13px;outline:none;border-radius:20px;transition:border-color .15s;width:auto}
+        .chat-inp:focus{border-color:var(--grn);background:var(--bg-elev)}
+        .chat-inp::placeholder{color:var(--fg-faint)}
+        .chat-send{width:34px;height:34px;border-radius:50%;background:var(--grn);border:none;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s}
+        .chat-send:hover{background:var(--grn-lt)}
+        .chat-send:disabled{background:var(--brd);cursor:not-allowed}
+        .online-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 4px var(--ok);display:inline-block}
       `}</style>
 
       <div className="shell">
-
-        {/* ── Sidebar ── */}
+        {/* ── SIDEBAR ── */}
         <div className="sidebar">
           <div className="sb-head">
             <div className="logomark">N</div>
@@ -339,12 +452,30 @@ export default function EngineerDashboardPage() {
             </div>
           </div>
 
+          {/* Team info block in sidebar */}
+          {teamInfo && (
+            <div className="sb-team">
+              <div style={{ fontSize: 9, color: 'rgba(255,255,255,.35)', fontFamily: '"JetBrains Mono",monospace', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 4 }}>My Team</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#fff', marginBottom: 2 }}>{teamInfo.name}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 10, color: 'rgba(255,255,255,.45)', fontFamily: '"JetBrains Mono",monospace' }}>{teamInfo.team_id}</span>
+                <span style={{ fontSize: 10, color: 'rgba(255,255,255,.35)' }}>·</span>
+                <span style={{ fontSize: 10, color: 'rgba(255,255,255,.5)' }}>{teamInfo.role_in_team}</span>
+              </div>
+              {teamInfo.manager_name && (
+                <div style={{ fontSize: 10, color: 'rgba(255,255,255,.4)', marginTop: 3 }}>
+                  Mgr: <span style={{ color: 'rgba(255,255,255,.65)' }}>{teamInfo.manager_name}</span>
+                </div>
+              )}
+            </div>
+          )}
+
           <div style={{ marginTop: 8 }}>
             <div className="nav-lbl">Work</div>
             {([
-              { id: 'queue', label: 'Ticket Queue', icon: 'inbox' },
-              { id: 'kb',    label: 'Knowledge Base', icon: 'book' },
-              { id: 'history', label: 'History', icon: 'clock' },
+              { id: 'queue',   label: 'Ticket Queue',   icon: 'inbox' },
+              { id: 'kb',      label: 'Knowledge Base', icon: 'book'  },
+              { id: 'history', label: 'History',        icon: 'clock' },
             ] as const).map(n => (
               <div key={n.id} className={`nav-item ${tab === n.id ? 'active' : ''}`} onClick={() => setTab(n.id)}>
                 {n.id === 'queue' && <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>}
@@ -354,6 +485,22 @@ export default function EngineerDashboardPage() {
                 {n.id === 'queue' && <span className="nav-badge">{openTickets.length}</span>}
               </div>
             ))}
+
+            {/* Team Chat nav item — only if in a team */}
+            {teamInfo && (
+              <>
+                <div className="nav-lbl" style={{ marginTop: 8 }}>Team</div>
+                <div className={`nav-item ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                  Team Chat
+                  {chatConnected && tab === 'chat' && (
+                    <span className="nav-badge" style={{ background: 'rgba(26,122,74,.3)', color: 'rgba(255,255,255,.8)' }}>
+                      {onlineCount} online
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
           </div>
 
           <div className="sb-foot">
@@ -365,52 +512,54 @@ export default function EngineerDashboardPage() {
           </div>
         </div>
 
-        {/* ── Main ── */}
+        {/* ── MAIN ── */}
         <div className="main">
-
           {/* Topbar */}
           <div className="topbar">
             <div className="crumbs">
               <span>NexusDesk</span>
               <span style={{ color: 'var(--fg-faint)' }}>/</span>
-              <b>{{ queue: 'Ticket Queue', kb: 'Knowledge Base', history: 'History' }[tab]}</b>
+              <b>{{ queue: 'Ticket Queue', kb: 'Knowledge Base', history: 'History', chat: `${teamInfo?.name || 'Team'} Chat` }[tab]}</b>
             </div>
             <span className="grow" />
-
-            <div className="status-toggle" style={{ marginLeft: 12 }}>
-              {[
-                { s: 'available', l: 'Avail', c: 'on-avail' },
-                { s: 'busy',      l: 'Busy',  c: 'on-busy' },
-                { s: 'away',      l: 'Away',  c: 'on-away' },
-              ].map(o => (
-                <div key={o.s} className={`st-opt ${availability === o.s ? o.c : ''}`} onClick={() => setAvail(o.s)}>
-                  {availability === o.s && <span className={`dot dot-${o.s === 'available' ? 'ok' : o.s === 'busy' ? 'warn' : 'crit'} pulse`} style={{ marginRight: 4 }} />}
-                  {o.l}
-                </div>
-              ))}
-            </div>
-
+            {tab !== 'chat' && (
+              <div className="status-toggle" style={{ marginLeft: 12 }}>
+                {[
+                  { s: 'available', l: 'Avail', c: 'on-avail' },
+                  { s: 'busy',      l: 'Busy',  c: 'on-busy'  },
+                  { s: 'away',      l: 'Away',  c: 'on-away'  },
+                ].map(o => (
+                  <div key={o.s} className={`st-opt ${availability === o.s ? o.c : ''}`} onClick={() => setAvail(o.s)}>
+                    {availability === o.s && <span className={`dot dot-${o.s === 'available' ? 'ok' : o.s === 'busy' ? 'warn' : 'crit'} pulse`} style={{ marginRight: 4 }} />}
+                    {o.l}
+                  </div>
+                ))}
+              </div>
+            )}
+            {tab === 'chat' && chatConnected && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className="online-dot"/>
+                <span style={{ fontSize: 12, color: 'var(--ok)' }}>{onlineCount} online</span>
+              </div>
+            )}
             <button className="btn btn-g btn-sm" onClick={() => { localStorage.clear(); window.location.replace('/auth/login') }}>Sign out</button>
           </div>
 
-          {/* ── Content ── */}
+          {/* ── CONTENT ── */}
           <div className="content" style={{ height: 'calc(100vh - 48px)', overflowY: 'hidden' }}>
 
             {/* ── QUEUE TAB ── */}
             {tab === 'queue' && (
               <div className="split" style={{ height: '100%' }}>
-
-                {/* Left — ticket list */}
                 <div className="split-l">
-                  {/* Stats bar */}
                   {stats && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 1, background: 'var(--brd)', borderBottom: '1px solid var(--brd)', flexShrink: 0 }}>
                       {[
-                        { l: 'Active',     v: stats.active_tickets,        c: 'var(--warn)' },
-                        { l: 'This Week',  v: stats.this_week_resolved,     c: 'var(--ok)' },
-                        { l: 'Total',      v: stats.total_resolved,          c: 'var(--grn)' },
-                        { l: 'SLA',        v: `${stats.sla_compliance_rate}%`, c: 'var(--ok)' },
-                        { l: 'Avg',        v: `${stats.avg_resolution_time}m`,  c: '#2a6bab' },
+                        { l: 'Active',    v: stats.active_tickets,         c: 'var(--warn)' },
+                        { l: 'This Week', v: stats.this_week_resolved,      c: 'var(--ok)'   },
+                        { l: 'Total',     v: stats.total_resolved,           c: 'var(--grn)'  },
+                        { l: 'SLA',       v: `${stats.sla_compliance_rate}%`, c: 'var(--ok)'  },
+                        { l: 'Avg',       v: `${stats.avg_resolution_time}m`, c: '#2a6bab'    },
                       ].map((s, i) => (
                         <div key={i} style={{ background: 'var(--bg-elev)', padding: '10px 14px' }}>
                           <div style={{ fontSize: 10, color: 'var(--fg-mute)', fontFamily: '"JetBrains Mono",monospace', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 3 }}>{s.l}</div>
@@ -420,7 +569,6 @@ export default function EngineerDashboardPage() {
                     </div>
                   )}
 
-                  {/* Filter bar */}
                   <div className="fbar">
                     <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--fg-mute)', fontFamily: '"JetBrains Mono",monospace', textTransform: 'uppercase', letterSpacing: '.06em' }}>Queue</span>
                     <span className="pill">{openTickets.length} open</span>
@@ -428,13 +576,10 @@ export default function EngineerDashboardPage() {
                     <button className="btn btn-sm" onClick={fetchData}>↻ Refresh</button>
                   </div>
 
-                  {/* Table */}
                   <div style={{ flex: 1, overflowY: 'auto' }}>
                     <table className="dt">
                       <thead>
-                        <tr>
-                          <th>ID</th><th>Issue</th><th>User</th><th>Domain</th><th>Priority</th><th>Status</th><th>Created</th>
-                        </tr>
+                        <tr><th>ID</th><th>Issue</th><th>User</th><th>Domain</th><th>Priority</th><th>Status</th><th>Created</th></tr>
                       </thead>
                       <tbody>
                         {loading ? (
@@ -460,8 +605,6 @@ export default function EngineerDashboardPage() {
                         ))}
                       </tbody>
                     </table>
-
-                    {/* Resolved section */}
                     {resolvedTickets.length > 0 && (
                       <div style={{ padding: '12px 14px', borderTop: '1px solid var(--brd)' }}>
                         <div className="sec-lbl" style={{ marginBottom: 8 }}>Recently Resolved · {resolvedTickets.length}</div>
@@ -481,7 +624,7 @@ export default function EngineerDashboardPage() {
                   </div>
                 </div>
 
-                {/* Right — detail panel */}
+                {/* Right panel */}
                 <div className="split-r fade">
                   {!selected ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--fg-mute)', gap: 10 }}>
@@ -491,8 +634,6 @@ export default function EngineerDashboardPage() {
                     </div>
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-
-                      {/* Panel header */}
                       <div style={{ background: 'var(--grn)', padding: '12px 16px', flexShrink: 0 }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                           <div>
@@ -511,10 +652,7 @@ export default function EngineerDashboardPage() {
                         </div>
                       </div>
 
-                      {/* Panel body */}
                       <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-
-                        {/* User */}
                         <div className="card">
                           <div className="c-head"><span className="sec-lbl" style={{ margin: 0 }}>User</span></div>
                           <div style={{ padding: '10px 14px' }}>
@@ -527,14 +665,10 @@ export default function EngineerDashboardPage() {
                               </div>
                             </div>
                             <hr className="div" />
-                            <div className="small muted">
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" style={{ marginRight: 4, verticalAlign: 'middle' }}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                              Created {fmtTime(selected.created_at, selected.user_timezone)}
-                            </div>
+                            <div className="small muted">Created {fmtTime(selected.created_at, selected.user_timezone)}</div>
                           </div>
                         </div>
 
-                        {/* Description */}
                         <div className="card">
                           <div className="c-head"><span className="sec-lbl" style={{ margin: 0 }}>Issue Description</span></div>
                           <div className="kb-c" style={{ margin: 10, borderRadius: 4 }}>{selected.description}</div>
@@ -546,7 +680,6 @@ export default function EngineerDashboardPage() {
                           )}
                         </div>
 
-                        {/* AI Diagnosis */}
                         {selected.ai_diagnosis && (
                           <div className="card">
                             <div className="c-head">
@@ -557,12 +690,9 @@ export default function EngineerDashboardPage() {
                           </div>
                         )}
 
-                        {/* Screenshot */}
                         {selected.cnn_image_result && (
                           <div className="card">
-                            <div className="c-head">
-                              <span className="sec-lbl" style={{ margin: 0 }}>Screenshot · CNN Detection</span>
-                            </div>
+                            <div className="c-head"><span className="sec-lbl" style={{ margin: 0 }}>Screenshot · CNN Detection</span></div>
                             <div style={{ padding: 10 }}>
                               <div className="kb-c" style={{ marginBottom: 8 }}>
                                 {selected.cnn_image_result.includes(' |') ? selected.cnn_image_result.split(' | ').slice(1).join(' · ') : 'Screenshot uploaded by user'}
@@ -574,7 +704,6 @@ export default function EngineerDashboardPage() {
                           </div>
                         )}
 
-                        {/* KB Similarity */}
                         <div className="card">
                           <div className="c-head">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--grn)" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
@@ -605,7 +734,6 @@ export default function EngineerDashboardPage() {
                           </div>
                         </div>
 
-                        {/* Resolution */}
                         {selected.status !== 'resolved' ? (
                           <div className="card">
                             <div className="c-head"><span className="sec-lbl" style={{ margin: 0 }}>Resolution Notes</span></div>
@@ -627,7 +755,6 @@ export default function EngineerDashboardPage() {
                             <div style={{ padding: '10px 14px', fontSize: 12, lineHeight: 1.7, color: 'var(--fg-dim)' }}>{selected.resolution_notes}</div>
                           </div>
                         ) : null}
-
                       </div>
                     </div>
                   )}
@@ -644,7 +771,7 @@ export default function EngineerDashboardPage() {
                     <div className="small muted">Semantic search across all IT documentation and resolved tickets</div>
                   </div>
                   <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                    <input placeholder="Search docs... e.g. 'SSL certificate renewal', 'VPN setup'" value={kbSearch} onChange={e => setKbSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && searchKB()} style={{ flex: 1 }} />
+                    <input placeholder="Search docs..." value={kbSearch} onChange={e => setKbSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && searchKB()} style={{ flex: 1 }} />
                     <button className="btn btn-p" onClick={searchKB} disabled={kbSearching || !kbSearch.trim()}>
                       {kbSearching ? 'Searching...' : 'Search'}
                     </button>
@@ -690,9 +817,9 @@ export default function EngineerDashboardPage() {
                   {stats && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 10, marginBottom: 16 }}>
                       {[
-                        { l: 'Total Resolved',  v: stats.total_resolved },
-                        { l: 'Avg Resolution',  v: `${stats.avg_resolution_time}m` },
-                        { l: 'SLA Compliance',  v: `${stats.sla_compliance_rate}%` },
+                        { l: 'Total Resolved', v: stats.total_resolved },
+                        { l: 'Avg Resolution', v: `${stats.avg_resolution_time}m` },
+                        { l: 'SLA Compliance', v: `${stats.sla_compliance_rate}%` },
                       ].map((s, i) => (
                         <div key={i} className="card" style={{ padding: '12px 14px' }}>
                           <div className="tiny muted">{s.l}</div>
@@ -719,6 +846,79 @@ export default function EngineerDashboardPage() {
                       </tbody>
                     </table>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── CHAT TAB ── */}
+            {tab === 'chat' && (
+              <div className="chat-shell">
+
+                {/* Team info header */}
+                {teamInfo && (
+                  <div style={{ padding: '10px 16px', background: 'var(--bg-elev)', borderBottom: '1px solid var(--brd)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+                    <div style={{ width: 32, height: 32, borderRadius: 6, background: 'var(--grn)', color: '#fff', display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
+                      {teamInfo.name.charAt(0)}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{teamInfo.name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--fg-mute)', fontFamily: '"JetBrains Mono",monospace' }}>
+                        {teamInfo.team_id} · {teamInfo.domain_focus?.slice(0, 2).map(d => dLabel(d)).join(', ')} · {teamInfo.member_count} members
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>Manager: <span style={{ fontWeight: 500, color: 'var(--fg)' }}>{teamInfo.manager_name}</span></div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, justifyContent: 'flex-end', marginTop: 2 }}>
+                        <span className="online-dot" style={{ width: 6, height: 6, background: chatConnected ? 'var(--ok)' : 'var(--brd)', boxShadow: chatConnected ? '0 0 4px var(--ok)' : 'none' }}/>
+                        <span style={{ fontSize: 11, color: chatConnected ? 'var(--ok)' : 'var(--fg-mute)' }}>
+                          {chatConnected ? `${onlineCount} online` : 'Connecting...'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Messages */}
+                <div className="chat-msgs">
+                  {chatMessages.length === 0 && (
+                    <div style={{ textAlign: 'center', color: 'var(--fg-mute)', fontSize: 12, marginTop: 60 }}>
+                      No messages yet. Say hello to your team!
+                    </div>
+                  )}
+                  {chatMessages.map((msg, i) => {
+                    const isMe     = msg.sender_id === currentUserId
+                    const isSystem = msg.type === 'system'
+                    return (
+                      <div key={msg.id || i} className={`cmsg ${isSystem ? 'system' : isMe ? 'mine' : 'other'}`}>
+                        {!isSystem && !isMe && (
+                          <div className="cmeta" style={{ color: roleColor(msg.sender_role) }}>
+                            {msg.sender_name} · {msg.sender_role}
+                          </div>
+                        )}
+                        <div className={`cbubble ${getBubbleClass(msg)}`}>{msg.message}</div>
+                        {!isSystem && <div className="cts">{chatTime(msg.timestamp)}</div>}
+                      </div>
+                    )
+                  })}
+                  <div ref={chatBottom}/>
+                </div>
+
+                {/* Input */}
+                <div className="chat-input-row">
+                  <input
+                    className="chat-inp"
+                    placeholder={chatConnected ? `Message ${teamInfo?.name || 'your team'}...` : 'Connecting...'}
+                    value={chatInput}
+                    onChange={e => setChatInput(e.target.value)}
+                    onKeyDown={handleChatKey}
+                    disabled={!chatConnected}
+                  />
+                  <button className="chat-send" onClick={sendChatMessage} disabled={!chatConnected || !chatInput.trim()}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <line x1="22" y1="2" x2="11" y2="13"/>
+                      <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                    </svg>
+                  </button>
                 </div>
               </div>
             )}

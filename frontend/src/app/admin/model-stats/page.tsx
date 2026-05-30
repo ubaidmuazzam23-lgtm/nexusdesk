@@ -36,7 +36,7 @@ const MODELS = [
 // ── HARDCODED STATS — never change ───────────────────────────────────────────
 const HARDCODED = {
   rnn: {
-    accuracy: 96, precision: 38, recall: 41, f1: 39,
+    accuracy: 42, precision: 38, recall: 41, f1: 39,
     byClass: {
       simple:   { accuracy: 48, precision: 44, recall: 47, f1: 45, total: 28, correct: 13 },
       moderate: { accuracy: 32, precision: 29, recall: 31, f1: 30, total: 31, correct: 10 },

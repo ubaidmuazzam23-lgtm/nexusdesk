@@ -1,4 +1,4 @@
-# File: backend/app/schemas/auth.py
+# Location: ./backend/app/schemas/auth.py
 
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
@@ -41,6 +41,7 @@ class LoginResponse(BaseModel):
     role: UserRole
     full_name: str
     email: str
+    user_id: str
 
 
 class RefreshRequest(BaseModel):
