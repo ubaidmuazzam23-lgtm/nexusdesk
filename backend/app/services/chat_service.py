@@ -97,7 +97,7 @@ STEP 2 — Ask OS and run DNS check (regardless of Yes/No/Maybe):
 Ask: "What OS are you on? (Windows / Mac / Linux)"
 Then give the command:
   Windows: nslookup <URL>
-  Mac/Linux: dig <URL>
+  Mac/Linux: host <URL>
 Ask them to paste the full output.
 
 STEP 3 — Analyze the resolved IP:
@@ -453,7 +453,7 @@ def _handle_netskope_triage_answer(db: Session, session: dict, sid: str, answer:
     session["asset_match"] = {
         "table_name":    "netskope_custom",
         "display_name":  "Netskope Assets",
-        "contact_email": "mgr.netskope@nexusdesk.com",
+        "contact_email": "eng.netskope1@nexusdesk.com",
         "manager_email": "mgr.netskope@nexusdesk.com",
         "identifier":    "Netskope Gateway",
         "environment":   "Production",
@@ -621,7 +621,7 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
             session["triage_started"] = True
             # For URL/Netskope scenarios force networking domain for better triage
             all_text = " ".join(m["content"].lower() for m in session["messages"]) + " " + reply.lower()
-            netskope_keywords = ["netskope", "nslookup", "dig ", "resolving to", "191.",
+            netskope_keywords = ["netskope", "nslookup", "host ", "resolving to", "191.",
                                   "routing issue", "dns resolution", "103.", "141."]
             if any(kw in all_text for kw in netskope_keywords):
                 session["domain"] = "networking"
