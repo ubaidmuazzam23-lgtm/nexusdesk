@@ -49,7 +49,7 @@ SYSTEM_PROMPT = """You are an IT support specialist at NexusDesk.
 
 STRICT FORMATTING:
 - Plain sentences only. No bullet points, no markdown, no asterisks, no dashes as bullets.
-- Under 120 words per response.
+- Under 150 words per response.
 - One question at a time.
 - Never start with "Certainly", "Absolutely", "Of course", "Great".
 
@@ -64,7 +64,6 @@ When ready to solve, end your reply with the signal: [READY_TO_SOLVE]
 PHASE 2 — SOLVE:
 You now have context. Give ONE specific targeted solution per response.
 Each attempt must try something meaningfully different.
-After 3 failed solve attempts, end your reply with: [NEEDS_ENGINEER]
 
 PHASE 3 — DO NOT handle. The system will take over.
 
@@ -77,7 +76,66 @@ Severity: critical (production/all users), high (user blocked), medium (degraded
 
 If the user says something is fixed, reply warmly and briefly. End with <meta>{"domain":"...","severity":"low"}</meta>
 
-IMPORTANT: Never use [NEEDS_ENGINEER] on your own. The system will escalate automatically after 3 solve attempts. Just keep trying to help."""
+IMPORTANT: Never use [NEEDS_ENGINEER]. The system escalates automatically after 3 solve attempts.
+
+─────────────────────────────────────────────────────────────────────────────
+SPECIAL PROTOCOL — URL / APPLICATION ACCESS ISSUES
+─────────────────────────────────────────────────────────────────────────────
+CRITICAL: The product name is "Netskope" — spelled with a lowercase k, NOT "NetScope".
+Always write "Netskope" in every message. Never write "NetScope".
+
+When a user cannot access a URL, website, or application, use this EXACT flow.
+SKIP the normal intake→solve×3→triage flow entirely for these issues.
+
+STEP 1 — Ask about Netskope (first message only):
+"Are you trying to access this through Netskope?
+  A) Yes
+  B) No
+  C) Not sure / Maybe"
+
+STEP 2 — Ask OS and run DNS check (regardless of Yes/No/Maybe):
+Ask: "What OS are you on? (Windows / Mac / Linux)"
+Then give the command:
+  Windows: nslookup <URL>
+  Mac/Linux: dig <URL>
+Ask them to paste the full output.
+
+STEP 3 — Analyze the resolved IP:
+
+IF IP starts with 191.x.x.x:
+  Regardless of Yes/No/Maybe answer about Netskope:
+  Say: "DNS is resolving to 191.x.x.x — this is the correct routing range,
+  so DNS is working properly. This is not a DNS issue."
+  Then do up to 2 targeted troubleshooting steps:
+    - Different browser / incognito mode
+    - Clear cache and cookies
+    - Check VPN status if required for this app
+    - Try from a different network (mobile hotspot)
+  After 2 attempts if still unresolved, end reply with [READY_TO_SOLVE]
+
+IF IP is anything else (103.x, 141.x, 172.x, 10.x, or DNS fails):
+  IF user said YES or MAYBE to Netskope:
+    Say: "DNS is resolving to [IP] instead of the expected 191.x.x.x range.
+    This indicates a Netskope routing issue."
+    Fix attempts:
+      1. Disconnect and reconnect Netskope, run dig again
+      2. Flush DNS cache (sudo dscacheutil -flushcache on Mac, ipconfig /flushdns on Windows)
+
+  IF user said NO to Netskope:
+    Say: "DNS is resolving to [IP] — this indicates a DNS routing issue on your network."
+    Fix attempts:
+      1. Flush DNS cache (sudo dscacheutil -flushcache on Mac, ipconfig /flushdns on Windows), then run dig again
+      2. Try accessing from a different network like mobile hotspot — if it works there, the issue is on your office network
+  After 2 attempts if still unresolved, end reply with [READY_TO_SOLVE]
+
+IMPORTANT: For this protocol, [READY_TO_SOLVE] means route to triage, not more solving.
+End with [READY_TO_SOLVE] as soon as 2 fix attempts fail.
+
+DETECTION — trigger when user says:
+"can't access", "cannot open", "URL not working", "website down", "not loading",
+"can't reach", "browser error", "site not found", "ERR_NAME_NOT_RESOLVED",
+"403", "404", "502", "503", "connection refused", "timed out accessing"
+─────────────────────────────────────────────────────────────────────────────"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,6 +164,9 @@ def _get_session(sid: str) -> dict:
             "asset_context":     {},
             "user_wants_escalate": False,
             "triage_started":     False,
+            "netskope_answer":    "",
+            "netskope_triage":    False,  # True when Netskope custom triage is active
+            "netskope_triage_answered": False,
         }
     return _sessions[sid]
 
@@ -153,6 +214,12 @@ def _call_claude(session: dict, phase_hint: str = "") -> tuple:
     # Clean reply
     clean = re.sub(r'\[READY_TO_SOLVE\]|\[NEEDS_ENGINEER\]', '', raw)
     clean = re.sub(r'\s*<meta>.*?</meta>', '', clean, flags=re.DOTALL).strip()
+
+    # Always correct product name spelling regardless of what Claude generates
+    clean = re.sub(r'NetScope', 'Netskope', clean)
+    clean = re.sub(r'Netscope', 'Netskope', clean)
+    clean = re.sub(r'netscope', 'netskope', clean)
+    clean = re.sub(r'NETSCOPE', 'NETSKOPE', clean)
 
     return clean, domain, severity, signals
 
@@ -304,6 +371,111 @@ def _handle_triage_answer(db: Session, session: dict, sid: str, answer: str) -> 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NETSKOPE CUSTOM TRIAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+NETSKOPE_TRIAGE_QUESTION = """Before I raise this ticket I need a few quick details to route it to exactly the right engineer.
+
+Please answer all of these:
+
+1. Which cloud provider or platform are you using to access this? (AWS / Azure / GCP / On-premise / Not sure)
+2. What is your Account ID, Tenant ID, or Organisation name?
+3. What is the name of the instance, server, or device you are trying to reach?
+4. What environment is this? (Production / Staging / Development)"""
+
+
+def _start_netskope_triage(session: dict, sid: str) -> ChatMessageResponse:
+    """Start Netskope custom triage — ask all 4 questions in one message."""
+    session["netskope_triage"]          = True
+    session["netskope_triage_answered"] = False
+
+    return ChatMessageResponse(
+        session_id        = sid,
+        reply             = NETSKOPE_TRIAGE_QUESTION,
+        intent            = "context_gathering",
+        detected_domain   = "networking",
+        detected_severity = session.get("severity") or "high",
+        resolved          = False,
+        can_escalate      = False,
+        attempt_number    = session.get("solve_attempts", 2),
+        context_gathering = True,
+    )
+
+
+def _handle_netskope_triage_answer(db: Session, session: dict, sid: str, answer: str) -> ChatMessageResponse:
+    """
+    Process the user's single reply to all 4 Netskope triage questions.
+    Builds professional summaries for both user and engineer.
+    """
+    session["netskope_triage_answered"] = True
+    session["netskope_triage"]          = False
+
+    # Collect context from conversation
+    msgs      = session.get("messages", [])
+    user_msgs = [m["content"] for m in msgs if m["role"] == "user"]
+    ai_msgs   = [m["content"] for m in msgs if m["role"] == "assistant"]
+
+    # Find original URL/app from first user message
+    original_url = next(
+        (m for m in user_msgs if any(kw in m.lower() for kw in ["http", ".com", "access", "application", "url"])),
+        user_msgs[0] if user_msgs else "the application"
+    )
+
+    # Extract resolved IP from DNS output
+    dns_msg  = next((m for m in user_msgs if any(kw in m for kw in ["IN A", "103.", "141.", "172.", "10.0", "10.1"])), "")
+    ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', dns_msg)
+    resolved_ip = ip_match.group(1) if ip_match else "a non-191.x.x.x address"
+
+    answer_clean = answer.strip()
+
+    # ── Engineer description — professional incident format ──────────────
+    diagnosis = (
+        f"Incident: Netskope Routing Issue — Application Access Blocked\n\n"
+        f"User is unable to access {original_url.strip()} from their {answer_clean}.\n\n"
+        f"DNS is resolving to {resolved_ip} instead of the expected 191.x.x.x Netskope "
+        f"range, confirming traffic is not routing through Netskope.\n\n"
+        f"Reconnecting Netskope and flushing DNS cache did not resolve the issue.\n"
+        f"Engineer intervention required to investigate Netskope gateway configuration."
+    )
+
+    # ── User-facing summary — warm and clear ────────────────────────────
+    user_summary = (
+        f"We've gone through your issue — {original_url.strip()} is not accessible "
+        f"because traffic is not routing through Netskope correctly. "
+        f"We tried reconnecting Netskope and flushing DNS but the issue persists.\n\n"
+        f"This has been raised to our Netskope team and will be resolved shortly."
+    )
+
+    session["asset_context"]["diagnosis"]    = diagnosis
+    session["asset_context"]["user_details"] = answer_clean
+    session["asset_context"]["user_summary"] = user_summary
+
+    session["asset_match"] = {
+        "table_name":    "netskope_custom",
+        "display_name":  "Netskope Assets",
+        "contact_email": "mgr.netskope@nexusdesk.com",
+        "manager_email": "mgr.netskope@nexusdesk.com",
+        "identifier":    "Netskope Gateway",
+        "environment":   "Production",
+        "team":          "Netskope & Cloud Security",
+        "row":           {"diagnosis": diagnosis},
+    }
+    session["asset_confirmed"] = True
+
+    return ChatMessageResponse(
+        session_id        = sid,
+        reply             = user_summary,
+        intent            = "ready_to_escalate",
+        detected_domain   = "networking",
+        detected_severity = session.get("severity") or "high",
+        resolved          = False,
+        can_escalate      = True,
+        attempt_number    = session.get("solve_attempts", 2),
+        context_gathering = False,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN PROCESS MESSAGE
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -315,7 +487,11 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
     if not session["problem"] and data.message:
         session["problem"] = data.message[:400]
 
-    # Triage Q&A active
+    # Netskope custom triage — single Q&A round
+    if session.get("netskope_triage"):
+        return _handle_netskope_triage_answer(db, session, sid, data.message)
+
+    # Normal asset triage Q&A
     if session["triage_active"]:
         return _handle_triage_answer(db, session, sid, data.message)
 
@@ -349,15 +525,70 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
     # Phase hint for Claude
     user_wants_escalate = session.get("user_wants_escalate", False)
 
+    # Detect if this is a URL/Netskope scenario — skip intake, go straight to protocol
+    # URL/reachability scenario detection
+    # Triggers when user says an app/URL/site is unreachable, not loading, not responding
+    url_keywords = [
+        "can't access", "cannot access", "cant access",
+        "can't reach", "cannot reach", "cant reach",
+        "not reachable", "unreachable", "not accessible",
+        "not loading", "won't load", "wont load", "page not loading",
+        "not responding", "not opening", "won't open", "wont open",
+        "unable to access", "unable to open", "unable to reach",
+        "site not found", "page not found",
+        "url not", "website not", "webpage not",
+        "application not loading", "app not loading",
+        "is not accessible", "is not reachable", "is not loading",
+        "http://", "https://", ".com", ".internal", ".corp",
+        "netskope", "nslookup", "191.", "dns",
+        "err_name_not_resolved", "dns_probe", "err_connection",
+        "404", "502", "503", "connection refused", "timed out",
+        "connection error", "cannot connect", "can't connect",
+    ]
+    all_msgs_lower = " ".join(m["content"].lower() for m in session["messages"])
+    is_url_scenario = any(kw in all_msgs_lower for kw in url_keywords)
+
     if session["phase"] == "intake":
-        if user_wants_escalate:
+        if is_url_scenario:
+            # Detect if user already answered the Netskope question
+            netskope_answer = ""
+            for m in session["messages"]:
+                c = m["content"].lower().strip()
+                if c in ("yes", "a", "a)", "yes, i am", "yes i am", "yeah"):
+                    netskope_answer = "YES"
+                elif c in ("no", "b", "b)", "no i am not", "nope"):
+                    netskope_answer = "NO"
+                elif c in ("not sure", "maybe", "c", "c)", "not sure / maybe", "unsure"):
+                    netskope_answer = "MAYBE"
+            if netskope_answer:
+                session["netskope_answer"] = netskope_answer
+            ns = session.get("netskope_answer", "")
+            if ns == "NO":
+                hint = "URL/APPLICATION ACCESS PROTOCOL — USER SAID NO TO NETSKOPE. This user is NOT using Netskope. Do NOT mention Netskope reconnection. Focus on DNS routing issue on their network. If DNS resolves to non-191.x.x.x range, say it is a DNS issue (not Netskope issue). Fixes: flush DNS cache, try mobile hotspot. End with [READY_TO_SOLVE] after 2 attempts."
+            elif ns in ("YES", "MAYBE"):
+                hint = "URL/APPLICATION ACCESS PROTOCOL — USER IS USING NETSKOPE (or maybe). If DNS resolves to non-191.x.x.x range, say it is a Netskope routing issue. Fixes: disconnect/reconnect Netskope, flush DNS. End with [READY_TO_SOLVE] after 2 attempts."
+            else:
+                hint = "URL/APPLICATION ACCESS PROTOCOL: Follow the special Netskope protocol. First ask: Are you trying to access this through Netskope? A) Yes B) No C) Not sure / Maybe. Then get OS, run DNS check, analyze IP."
+        elif user_wants_escalate:
             hint = "PHASE 1 INTAKE: The user is urgently requesting escalation. You have enough context now. Acknowledge their urgency briefly, then end your reply with [READY_TO_SOLVE] immediately — do not ask more questions."
         else:
             hint = "PHASE 1 INTAKE: Ask questions to understand the problem. Do NOT give solutions yet. When you have enough context, end with [READY_TO_SOLVE]."
     elif session["phase"] == "solve":
         session["solve_attempts"] += 1
         n = session["solve_attempts"]
-        if user_wants_escalate and n < 3:
+        ns = session.get("netskope_answer", "")
+        if is_url_scenario and n >= 2:
+            hint = f"URL/NETSKOPE PROTOCOL: You have done {n} fix attempts. End this reply with [READY_TO_SOLVE] — the system will now route to triage and then raise the ticket."
+        elif is_url_scenario and ns == "NO":
+            # Check if IP was 191.x.x.x (correct) or wrong IP
+            msgs_text = " ".join(m["content"].lower() for m in session["messages"])
+            if "191." in msgs_text:
+                hint = f"URL PROTOCOL — NO NETSKOPE, DNS CORRECT (191.x.x.x): Fix attempt {n} of 2. DNS is fine. Give browser/app troubleshooting: incognito mode, clear cache, check VPN, try mobile hotspot."
+            else:
+                hint = f"URL/NETSKOPE PROTOCOL — USER SAID NO TO NETSKOPE: Fix attempt {n} of 2. Do NOT mention Netskope. DNS routing issue. Fixes: flush DNS cache or try mobile hotspot."
+        elif is_url_scenario:
+            hint = f"URL/NETSKOPE PROTOCOL: Fix attempt {n} of 2. Give one specific fix. If Netskope routing issue: disconnect/reconnect Netskope. If DNS correct: try browser fix."
+        elif user_wants_escalate and n < 3:
             hint = f"PHASE 2 SOLVE: The user wants to escalate but try attempt {n} of 3 first. Acknowledge urgency briefly then give one specific targeted fix. There are {3 - n} attempts remaining after this."
         elif n >= 3:
             hint = f"PHASE 2 SOLVE: Final attempt 3 of 3. Give your best remaining solution. After this the system will automatically escalate to an engineer."
@@ -384,14 +615,39 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
             print(f"  [Chat] Phase: intake → solve (forced after 3 user messages)")
 
         # After exactly 3 solve attempts → start triage (only once)
-        if session["phase"] == "solve" and session["solve_attempts"] >= 3 and not session.get("triage_started"):
+        max_attempts = 2 if is_url_scenario else 3
+        if session["phase"] == "solve" and session["solve_attempts"] >= max_attempts and not session.get("triage_started"):
             session["phase"]          = "triage"
             session["triage_started"] = True
+            # For URL/Netskope scenarios force networking domain for better triage
+            all_text = " ".join(m["content"].lower() for m in session["messages"]) + " " + reply.lower()
+            netskope_keywords = ["netskope", "nslookup", "dig ", "resolving to", "191.",
+                                  "routing issue", "dns resolution", "103.", "141."]
+            if any(kw in all_text for kw in netskope_keywords):
+                session["domain"] = "networking"
+                print(f"  [Chat] URL/Netskope scenario — domain set to networking for triage")
             print(f"  [Chat] Phase: solve → triage after 3 attempts")
-            # Return Claude reply + immediately trigger first triage question
+
+            print(f"  [Chat] Triage trigger: is_url_scenario={is_url_scenario} netskope={session.get('netskope_answer')}")
+            # For Netskope/URL scenarios — use custom single-question triage
+            if is_url_scenario:
+                netskope_triage_response = _start_netskope_triage(session, sid)
+                combined_reply = reply + "" + netskope_triage_response.reply
+                return ChatMessageResponse(
+                    session_id        = sid,
+                    reply             = combined_reply,
+                    intent            = "context_gathering",
+                    detected_domain   = "networking",
+                    detected_severity = severity,
+                    resolved          = False,
+                    can_escalate      = False,
+                    attempt_number    = session["solve_attempts"],
+                    context_gathering = True,
+                )
+
+            # Normal scenarios — use asset DB triage
             triage_response = _start_triage(db, session, sid)
-            # Combine Claude's final solve reply with the first triage question
-            combined_reply = reply + "" + triage_response.reply
+            combined_reply  = reply + "" + triage_response.reply
             return ChatMessageResponse(
                 session_id        = sid,
                 reply             = combined_reply,
@@ -526,25 +782,29 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
     sla_map      = {"critical":30,"high":120,"medium":480,"low":1440}
 
     # Build diagnosis
-    msgs       = session.get("messages", [])
-    ai_msgs    = [m["content"] for m in msgs if m["role"] == "assistant"]
-    diagnosis  = ai_msgs[-1][:500] if ai_msgs else ""
+    msgs      = session.get("messages", [])
+    ai_msgs   = [m["content"] for m in msgs if m["role"] == "assistant"]
 
-    if asset:
-        row = asset.get("row", {})
-        diagnosis += (
-            f"\n\nAsset Identified:"
-            f"\n  Asset:       {asset.get('identifier') or 'N/A'}"
-            f"\n  Environment: {asset.get('environment') or 'N/A'}"
-            f"\n  Team:        {asset.get('team') or 'N/A'}"
-            f"\n  Contact:     {asset.get('contact_email') or 'N/A'}"
-            f"\n  Manager:     {asset.get('manager_email') or 'N/A'}"
-        )
+    # For Netskope scenarios use the pre-built full diagnosis
+    if session.get("asset_context", {}).get("diagnosis"):
+        diagnosis = session["asset_context"]["diagnosis"]
+    else:
+        diagnosis = ai_msgs[-1][:500] if ai_msgs else ""
 
-    if context:
-        qs = session.get("triage_questions", [])
-        an = session.get("triage_answers", [])
-        diagnosis += "\n\nUser answers:\n" + "\n".join(f"  {q} → {a}" for q, a in zip(qs, an))
+        if asset:
+            diagnosis += (
+                f"\n\nAsset Identified:"
+                f"\n  Asset:       {asset.get('identifier') or 'N/A'}"
+                f"\n  Environment: {asset.get('environment') or 'N/A'}"
+                f"\n  Team:        {asset.get('team') or 'N/A'}"
+                f"\n  Contact:     {asset.get('contact_email') or 'N/A'}"
+                f"\n  Manager:     {asset.get('manager_email') or 'N/A'}"
+            )
+
+        if context:
+            qs = session.get("triage_questions", [])
+            an = session.get("triage_answers", [])
+            diagnosis += "\n\nUser answers:\n" + "\n".join(f"  {q} → {a}" for q, a in zip(qs, an))
 
     # Routing
     domain_str  = str(data.domain).lower().replace("ticketdomain.", "") if data.domain else "other"
@@ -557,12 +817,40 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
     print(f"  [Route] asset_match={asset}")
     print(f"  [Route] contact_email={contact_email} manager_email={manager_email}")
 
-    # P1 — asset owner
+    # P1 — asset owner or manager → team + best available engineer
     if contact_email:
         u = db.query(User).filter(User.email == contact_email).first()
-        if u and db.query(Engineer).filter(Engineer.user_id == u.id).first():
-            engineer_id = u.id
-            print(f"  [Route] Asset owner: {contact_email}")
+        if u:
+            eng = db.query(Engineer).filter(Engineer.user_id == u.id).first()
+            if eng:
+                engineer_id = u.id
+                print(f"  [Route] Asset owner: {contact_email}")
+            else:
+                # It's a manager — find their team and best available engineer
+                t = db.query(Team).filter(Team.manager_id == u.id).first()
+                if t:
+                    team_id = t.id
+                    print(f"  [Route] Manager → team: {contact_email} ({t.name})")
+                    # Also find best available engineer from this team
+                    from app.models.team import TeamMember
+                    members = db.query(TeamMember).filter(TeamMember.team_id == t.id).all()
+                    best_eng_id = None
+                    best_score  = -999
+                    for m in members:
+                        eu  = db.query(User).filter(User.id == m.user_id).first()
+                        eo  = db.query(Engineer).filter(Engineer.user_id == m.user_id).first()
+                        if not eu or not eo or not eo.is_activated:
+                            continue
+                        if str(eo.availability_status) not in ("available", "AvailabilityStatus.AVAILABLE"):
+                            continue
+                        score = -eo.active_ticket_count
+                        if score > best_score:
+                            best_score  = score
+                            best_eng_id = eu.id
+                    if best_eng_id:
+                        engineer_id = best_eng_id
+                        team_id     = None  # assign to engineer directly
+                        print(f"  [Route] Best team engineer found: {best_eng_id}")
 
     # P2 — manager's team
     if not engineer_id and manager_email:

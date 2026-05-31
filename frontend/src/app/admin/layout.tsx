@@ -10,10 +10,9 @@ const navItems = [
     { href: '/admin/engineers',      label: 'Engineers',      icon: '◈' },
     { href: '/admin/tickets',        label: 'All Tickets',    icon: '◉' },
     { href: '/admin/knowledge-base', label: 'Knowledge Base', icon: '◫' },
-    { href: '/admin/config',         label: 'Configuration',  icon: '◧' },
-    { href: '/admin/audit-log',      label: 'Audit Log',      icon: '◪' },
+   
     { href: '/admin/analytics',      label: 'Analytics',      icon: '◬' },
-    { href: '/admin/routing-simulator', label: 'Routing Simulator' },
+  
     { href: '/admin/teams', label: 'Teams', icon: '' },
     { href: '/admin/assets', label: 'Assets', icon: '◈' },
   ]

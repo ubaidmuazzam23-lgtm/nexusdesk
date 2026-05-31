@@ -350,7 +350,21 @@ export default function ChatPage() {
       })
       const d = await r.json()
       if (!r.ok) throw new Error(d.detail)
-      setMessages(prev => [...prev, { role: 'assistant', content: `✓ Ticket ${d.ticket_number} raised and routed to the responsible team.` }])
+      // Build routing confirmation message
+      let routingMsg = `✓ Ticket ${d.ticket_number} raised successfully.\n`
+      if (d.engineer_name) {
+        routingMsg += `\nAssigned Engineer: ${d.engineer_name}`
+        if (d.engineer_id) routingMsg += ` · ${d.engineer_id}`
+        routingMsg += `\n`
+        if (d.engineer_email) routingMsg += `Email: ${d.engineer_email}\n`
+        if (d.engineer_city) routingMsg += `Location: ${d.engineer_city}\n`
+        if (d.team_name) routingMsg += `Team: ${d.team_name}\n`
+        routingMsg += `\nYou can contact the engineer directly or check My Tickets for full contact details.`
+      } else if (d.team_name) {
+        routingMsg += `\nRouted to: ${d.team_name}\n`
+        routingMsg += `\nThe team will assign an engineer and reach out to you shortly. Check My Tickets for the team manager's contact details.`
+      }
+      setMessages(prev => [...prev, { role: 'assistant', content: routingMsg }])
       setShowEscalate(false)
       setCanEscalate(false)
       setIsGatheringContext(false)
