@@ -2,13 +2,9 @@
 #
 # RAG pipeline — ChromaDB + sentence-transformers
 # Install: pip install chromadb sentence-transformers pypdf2
-#
-# Used in 3 places:
-#   1. Admin/Engineer upload → chunk → embed → store
-#   2. Chat service → search on user message → pass context to Claude
-#   3. Engineer dashboard → ticket similarity with knowledge base
 
 import os
+import re
 import uuid
 import json
 from datetime import datetime
@@ -51,31 +47,212 @@ def _get_embedder():
 
 # ── Text extraction ───────────────────────────────────────────────────────────
 
+def _clean_pdf_text(text: str) -> str:
+    """
+    Clean raw PDF-extracted text to restore readable structure.
+    PDF extraction often produces flat text with no paragraph breaks.
+    """
+    # Normalize whitespace
+    text = text.replace("\t", "  ")
+    text = re.sub(r" {3,}", "  ", text)
+
+    # Remove standalone page numbers
+    text = re.sub(r"(?m)^\d+$", "", text)
+
+    # Normalize bullet characters
+    text = text.replace("●", "•").replace("◆", "•").replace("▪", "•")
+
+    # Detect flat PDF text: average line length > 150 chars means structure was lost
+    lines     = [l for l in text.split("\n") if l.strip()]
+    avg_len   = sum(len(l) for l in lines) / max(len(lines), 1)
+
+    if avg_len > 150:
+        # Split before numbered items: "something. 1. Next item"
+        text = re.sub(r"([.!?])\s+(\d+[.:]\s+[A-Z])", r"\1\n\2", text)
+        # Split before bullets after sentence endings
+        text = re.sub(r"([.!?])\s+(•\s)", r"\1\n\2", text)
+        # Split on common section keywords
+        section_kw = (
+            r"Introduction|Summary|Overview|Conclusion|Background|Components|"
+            r"Architecture|Troubleshooting|Resolution|Root Cause|Preventive|"
+            r"Key Takeaway|End of Document|Section|Appendix|References|"
+            r"Purpose|Scope|High-Level|Useful|Important"
+        )
+        text = re.sub(
+            rf"([.!?])\s+((?:{section_kw})\s*[\d.:)]*\s)",
+            r"\1\n\n\2",
+            text,
+        )
+        # Split ALL CAPS headings out of running text
+        text = re.sub(
+            r"([a-z.!?])\s+([A-Z]{3,}(?:\s+[A-Z]{2,}){0,4})\s*:",
+            r"\1\n\n\2:",
+            text
+        )
+
+    # Clean up excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _extract_docx_text(content: bytes) -> str:
+    """Extract text from .docx preserving headings and structure."""
+    try:
+        import io
+        from docx import Document as DocxDocument
+        doc = DocxDocument(io.BytesIO(content))
+        lines = []
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                lines.append("")
+                continue
+            style = para.style.name if para.style else ""
+            if "Heading 1" in style:
+                lines.append(f"\n{text.upper()}")
+            elif "Heading 2" in style:
+                lines.append(f"\n{text}")
+            else:
+                lines.append(text)
+        # Extract tables
+        for table in doc.tables:
+            lines.append("")
+            for row in table.rows:
+                row_cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                if row_cells:
+                    lines.append("  |  ".join(row_cells))
+            lines.append("")
+        text = "\n".join(lines)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+    except Exception as e:
+        print(f"  ⚠ DOCX extraction error: {e}")
+        return ""
+
+
 def _extract_text(content: bytes, filename: str) -> str:
-    if filename.lower().endswith(".pdf"):
+    """Extract text from file, preserving structure."""
+    fname = filename.lower()
+
+    if fname.endswith(".docx"):
+        return _extract_docx_text(content)
+
+    if fname.endswith(".pdf"):
         for lib in ["PyPDF2", "pypdf"]:
             try:
                 mod = __import__(lib)
                 import io
                 reader = mod.PdfReader(io.BytesIO(content))
-                return "\n".join(p.extract_text() or "" for p in reader.pages)
+                pages = []
+                for page in reader.pages:
+                    page_text = page.extract_text() or ""
+                    if page_text.strip():
+                        pages.append(page_text.strip())
+                raw = "\n\n".join(pages)
+                return _clean_pdf_text(raw)
             except (ImportError, Exception):
                 continue
+
+    # Plain text / markdown — decode as-is
     return content.decode("utf-8", errors="ignore")
 
 
-def _chunk_text(text: str, chunk_size: int = 400, overlap: int = 60) -> List[str]:
-    words = text.split()
-    chunks, i = [], 0
-    while i < len(words):
-        chunk = " ".join(words[i:i + chunk_size])
-        if chunk.strip():
-            chunks.append(chunk.strip())
-        i += chunk_size - overlap
-    return chunks
+def _chunk_text(text: str, chunk_size: int = 200, overlap: int = 30) -> List[str]:
+    """
+    Chunk by paragraphs first, then by size — preserving line breaks and structure.
+    Never joins paragraphs into a flat blob.
+    """
+    # Split into paragraphs
+    paragraphs = re.split(r"\n{2,}", text)
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+
+    chunks        = []
+    current_paras = []
+    current_len   = 0
+
+    for para in paragraphs:
+        para_words = para.split()
+        para_len   = len(para_words)
+
+        # Paragraph too large on its own — split by sentences
+        if para_len > chunk_size:
+            # First flush current buffer
+            if current_paras:
+                chunks.append("\n\n".join(current_paras))
+                current_paras = []
+                current_len   = 0
+            # Split large paragraph into sentence chunks
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            sent_buf  = []
+            sent_len  = 0
+            for sent in sentences:
+                sw = len(sent.split())
+                if sent_len + sw > chunk_size and sent_buf:
+                    chunks.append(" ".join(sent_buf))
+                    # Keep last sentence as overlap
+                    sent_buf  = [sent_buf[-1], sent] if sent_buf else [sent]
+                    sent_len  = len(" ".join(sent_buf).split())
+                else:
+                    sent_buf.append(sent)
+                    sent_len += sw
+            if sent_buf:
+                chunks.append(" ".join(sent_buf))
+            continue
+
+        # Adding this paragraph would exceed chunk_size
+        if current_len + para_len > chunk_size and current_paras:
+            chunks.append("\n\n".join(current_paras))
+            # Overlap: keep last paragraph for context continuity
+            overlap_para  = current_paras[-1] if current_paras else ""
+            current_paras = [overlap_para, para] if overlap_para else [para]
+            current_len   = len(overlap_para.split()) + para_len
+        else:
+            current_paras.append(para)
+            current_len += para_len
+
+    if current_paras:
+        chunks.append("\n\n".join(current_paras))
+
+    return [c.strip() for c in chunks if c.strip()]
 
 
-# ── Metadata store ────────────────────────────────────────────────────────────
+# ── AI Summary Generation ─────────────────────────────────────────────────────
+
+def _generate_summary(text: str, title: str, domain: str) -> str:
+    """Generate a concise AI summary of the document for engineers."""
+    try:
+        from app.core.config import settings
+        import anthropic
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+        prompt = f"""You are summarizing an IT support knowledge base document for engineers.
+
+Document title: {title}
+Domain: {domain}
+
+Document content:
+{text}
+
+Write a clear, structured summary for engineers. Include:
+1. What this document covers (1-2 sentences)
+2. Key technical points (3-5 bullet points)
+3. When to use this document (1-2 sentences)
+
+Keep it concise — under 200 words. Use plain text, no markdown headers."""
+
+        resp = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        print(f"  ⚠ Summary generation failed: {e}")
+        # Fallback: use first 300 chars of cleaned text
+        return text[:300].strip() + "..."
+
+
+# ── Metadata store ─────────────────────────────────────────────────────────────
 
 def _load_meta() -> dict:
     if os.path.exists(DOCS_META_PATH):
@@ -118,6 +295,9 @@ def upload_document(
 
     collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
 
+    # Generate AI summary
+    summary = _generate_summary(text[:4000], title, domain)
+
     meta = _load_meta()
     meta[doc_id] = {
         "id":               doc_id,
@@ -128,6 +308,7 @@ def upload_document(
         "uploaded_by":      uploaded_by,
         "uploaded_by_role": uploaded_by_role,
         "chunk_count":      len(chunks),
+        "summary":          summary,
         "created_at":       datetime.utcnow().isoformat(),
     }
     _save_meta(meta)
@@ -138,6 +319,7 @@ def upload_document(
         "doc_id":      doc_id,
         "title":       title,
         "chunk_count": len(chunks),
+        "summary":     summary,
         "message":     f"'{title}' indexed — {len(chunks)} chunks.",
     }
 
@@ -157,7 +339,7 @@ def search_knowledge(
 
         embedder        = _get_embedder()
         query_embedding = embedder.encode([query]).tolist()
-        where           = {"domain": domain} if domain and domain not in ("", "other", "all") else None
+        where = {"domain": domain} if domain and domain not in ("", "other", "all") else None
 
         results = collection.query(
             query_embeddings=query_embedding,
@@ -166,7 +348,9 @@ def search_knowledge(
             include=["documents", "metadatas", "distances"],
         )
 
-        hits = []
+        # Deduplicate by doc_id — keep only the best matching chunk per document
+        # This prevents the same document showing up 7 times with different chunks
+        seen_docs = {}
         meta = _load_meta()
         if results["documents"] and results["documents"][0]:
             for doc, metadata, dist in zip(
@@ -176,16 +360,22 @@ def search_knowledge(
             ):
                 doc_id   = metadata.get("doc_id", "")
                 doc_meta = meta.get(doc_id, {})
-                hits.append({
-                    "content":          doc,
-                    "title":            metadata.get("title", doc_meta.get("title", "Unknown")),
-                    "doc_id":           doc_id,
-                    "domain":           metadata.get("domain", "other"),
-                    "cosine_similarity": round((1 - dist) * 100, 1),
-                    "filename":         doc_meta.get("filename", ""),
-                    "description":      doc_meta.get("description", ""),
-                })
+                sim      = round((1 - dist) * 100, 1)
 
+                # Only keep the highest similarity chunk per document
+                if doc_id not in seen_docs or sim > seen_docs[doc_id]["cosine_similarity"]:
+                    seen_docs[doc_id] = {
+                        "content":           doc,
+                        "title":             metadata.get("title", doc_meta.get("title", "Unknown")),
+                        "doc_id":            doc_id,
+                        "domain":            metadata.get("domain", "other"),
+                        "cosine_similarity": sim,
+                        "filename":          doc_meta.get("filename", ""),
+                        "description":       doc_meta.get("description", ""),
+                        "summary":           doc_meta.get("summary", ""),
+                    }
+
+        hits = sorted(seen_docs.values(), key=lambda x: x["cosine_similarity"], reverse=True)
         return {"query": query, "results": hits, "total": len(hits)}
 
     except Exception as e:
@@ -193,19 +383,14 @@ def search_knowledge(
         return {"query": query, "results": [], "total": 0, "error": str(e)}
 
 
-# ── Ticket similarity (for engineer dashboard) ────────────────────────────────
+# ── Ticket similarity ─────────────────────────────────────────────────────────
 
 def get_similar_docs_for_ticket(
     query: str,
     domain: Optional[str] = None,
     n_results: int = 5,
 ) -> dict:
-    """
-    Returns knowledge base documents most similar to the ticket.
-    Includes cosine similarity score for each result.
-    """
     result = search_knowledge(query=query, n_results=n_results, domain=domain)
-    # Also try without domain filter for broader results
     if result["total"] < 2 and domain:
         broader = search_knowledge(query=query, n_results=n_results)
         if broader["total"] > result["total"]:
@@ -213,13 +398,9 @@ def get_similar_docs_for_ticket(
     return result
 
 
-# ── RAG context for chat (called from chat_service) ───────────────────────────
+# ── RAG context for chat ──────────────────────────────────────────────────────
 
 def get_rag_context(query: str, domain: Optional[str] = None, n_results: int = 3) -> str:
-    """
-    Returns formatted RAG context string to inject into Claude's prompt.
-    Returns empty string if no relevant docs found or KB is empty.
-    """
     try:
         result = search_knowledge(query=query, n_results=n_results, domain=domain)
         hits   = [r for r in result.get("results", []) if r["cosine_similarity"] >= 45]
@@ -229,20 +410,16 @@ def get_rag_context(query: str, domain: Optional[str] = None, n_results: int = 3
         print("\n  📖 RAG Context Injected:")
         print("  " + chr(9472)*52)
         for i, hit in enumerate(hits[:3], 1):
-            title    = hit["title"]
-            filename = hit["filename"]
-            domain   = hit["domain"]
-            sim      = hit["cosine_similarity"]
-            print(f"  [{i}] {title}")
-            print(f"      File      : {filename}")
-            print(f"      Domain    : {domain}")
-            print(f"      Similarity: {sim}%")
+            print(f"  [{i}] {hit['title']}")
+            print(f"      File      : {hit['filename']}")
+            print(f"      Domain    : {hit['domain']}")
+            print(f"      Similarity: {hit['cosine_similarity']}%")
         print("  " + chr(9472)*52 + "\n")
 
         context = "\n\n--- Relevant Knowledge Base Articles ---\n"
         for i, hit in enumerate(hits[:3], 1):
             context += f"\n[{i}] {hit['title']} (relevance: {hit['cosine_similarity']}%)\n"
-            context += hit["content"][:400] + "...\n"
+            context += hit["content"][:500] + "...\n"
         context += "\n--- End Knowledge Base ---\n"
         return context
 

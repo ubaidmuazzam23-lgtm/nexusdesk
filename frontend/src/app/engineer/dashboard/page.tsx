@@ -19,7 +19,7 @@ interface Stats {
 }
 interface KBResult {
   content: string; title: string; doc_id: string
-  domain: string; cosine_similarity: number; filename: string
+  domain: string; cosine_similarity: number; filename: string; summary?: string
 }
 interface TeamInfo {
   team_id: string; name: string; domain_focus: string[]
@@ -78,6 +78,54 @@ function ScreenshotImage({ url }: { url: string }) {
   return <img src={src} alt="screenshot" style={{ width: '100%', borderRadius: 4, border: '1px solid var(--brd)', maxHeight: 220, objectFit: 'contain', background: 'var(--bg)' }} />
 }
 
+// ── KB Content Renderer ───────────────────────────────────────────────────────
+function KBContent({ text }: { text: string }) {
+  const cleaned = (() => {
+    let t = text.replace(/[●▪◆□]/g, '•').replace(/\t/g, '  ').replace(/^\d+$/gm, '').trim()
+    const ratio = (t.match(/\n/g) || []).length / (t.length / 100)
+    if (ratio < 1) {
+      t = t.replace(/([.!?:])\s+(\d+[.:]\s+[A-Z])/g, '$1\n$2')
+      t = t.replace(/([.!?])\s+(•\s)/g, '$1\n$2')
+      t = t.replace(/\.\s+((?:Introduction|Summary|Overview|Conclusion|Root Cause|Preventive|Resolution|Diagnostic|Symptoms|Steps|Escalation|References|Appendix)\s*[\d.:)]*\s)/g, '.\n\n$1')
+    }
+    return t.replace(/\n{3,}/g, '\n\n').trim()
+  })()
+  const lines = cleaned.split('\n')
+  const els: React.ReactNode[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i], tr = line.trim()
+    if (!tr || tr.length <= 2) { els.push(<div key={i} style={{ height: 4 }} />); i++; continue }
+    if (/^[─═\-]{4,}$/.test(tr)) { els.push(<hr key={i} style={{ border: 'none', borderTop: '1px solid var(--brd)', margin: '8px 0' }} />); i++; continue }
+    const isAllCaps = tr === tr.toUpperCase() && tr.length > 2 && tr.length < 60 && !/https?:\/\//.test(tr) && !/^\d/.test(tr) && /[A-Z]/.test(tr) && tr.split(' ').length <= 6
+    if (isAllCaps) {
+      els.push(<div key={i} style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.12em', color: 'var(--fg-mute)', fontFamily: '"JetBrains Mono",monospace', marginTop: els.length > 0 ? 12 : 0, marginBottom: 5, paddingBottom: 3, borderBottom: '1px solid var(--brd)' }}>{tr}</div>)
+      i++; continue
+    }
+    const numM = tr.match(/^(?:STEP\s+)?(\d+)[\.:)]\s+(.+)$/i)
+    if (numM) {
+      els.push(<div key={i} style={{ display: 'flex', gap: 10, marginBottom: 5, alignItems: 'flex-start' }}><span style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 11, color: 'var(--grn)', fontWeight: 700, minWidth: 20, flexShrink: 0, paddingTop: 1 }}>{numM[1]}.</span><span style={{ fontSize: 12, lineHeight: 1.65, color: 'var(--fg-dim)', flex: 1 }}>{numM[2]}</span></div>)
+      i++; continue
+    }
+    if (/^[•\-\*]\s+/.test(tr)) {
+      els.push(<div key={i} style={{ display: 'flex', gap: 8, marginBottom: 3, alignItems: 'flex-start' }}><span style={{ color: 'var(--grn)', fontWeight: 700, fontSize: 14, lineHeight: 1, marginTop: 1, flexShrink: 0 }}>·</span><span style={{ fontSize: 12, lineHeight: 1.65, color: 'var(--fg-dim)', flex: 1 }}>{tr.replace(/^[•\-\*]\s+/, '')}</span></div>)
+      i++; continue
+    }
+    const kvM = tr.match(/^([A-Za-z][A-Za-z0-9\s&\/\-\.]{1,35}):\s+(.+)$/)
+    if (kvM && !tr.startsWith('http')) {
+      els.push(<div key={i} style={{ display: 'flex', gap: 10, marginBottom: 5, alignItems: 'flex-start' }}><span style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 10, fontWeight: 600, color: 'var(--fg-mute)', textTransform: 'uppercase', letterSpacing: '.04em', minWidth: 110, flexShrink: 0, paddingTop: 2 }}>{kvM[1]}</span><span style={{ fontSize: 12, color: 'var(--fg)', lineHeight: 1.55, flex: 1 }}>{kvM[2]}</span></div>)
+      i++; continue
+    }
+    if (line.startsWith('  ') && tr && !/^[•\-]/.test(tr)) {
+      els.push(<code key={i} style={{ display: 'block', fontFamily: '"JetBrains Mono",monospace', fontSize: 11, color: 'var(--grn)', background: 'var(--grn-w)', padding: '3px 10px', borderRadius: 4, marginBottom: 3, wordBreak: 'break-all' as any, borderLeft: '2px solid var(--grn)' }}>{tr}</code>)
+      i++; continue
+    }
+    els.push(<div key={i} style={{ fontSize: 12, color: 'var(--fg-dim)', lineHeight: 1.7, marginBottom: 3 }}>{tr}</div>)
+    i++
+  }
+  return <div>{els}</div>
+}
+
 export default function EngineerDashboardPage() {
   const [tickets,    setTickets]    = useState<Ticket[]>([])
   const [stats,      setStats]      = useState<Stats | null>(null)
@@ -99,6 +147,7 @@ export default function EngineerDashboardPage() {
   const [kbSearch,   setKbSearch]   = useState('')
   const [kbSearchRes, setKbSearchRes] = useState<KBResult[]>([])
   const [kbSearching, setKbSearching] = useState(false)
+  const [kbSelectedDoc, setKbSelectedDoc] = useState<KBResult | null>(null)
   const [toast,      setToast]      = useState<{ title: string; desc: string; type: string } | null>(null)
 
   // Chat state
@@ -128,7 +177,6 @@ export default function EngineerDashboardPage() {
     else setKbResults([])
   }, [selected])
 
-  // Connect/disconnect chat when switching to chat tab
   useEffect(() => {
     if (tab === 'chat' && teamInfo?.team_id) {
       connectChat(teamInfo.team_id)
@@ -193,8 +241,6 @@ export default function EngineerDashboardPage() {
   const connectChat = async (teamId: string) => {
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
     setChatMessages([]); setChatConnected(false)
-
-    // Load history
     try {
       const r = await fetch(`${API}/api/v1/teams/${teamId}/chat`, { headers: hdrs() })
       if (r.ok) {
@@ -202,7 +248,6 @@ export default function EngineerDashboardPage() {
         setChatMessages(history.map((m: any) => ({ ...m, type: 'message' })))
       }
     } catch {}
-
     const tk = localStorage.getItem('access_token') || ''
     const ws = new WebSocket(`${WS_URL}/api/v1/teams/${teamId}/ws?token=${tk}`)
     ws.onopen    = () => setChatConnected(true)
@@ -274,11 +319,11 @@ export default function EngineerDashboardPage() {
 
   const searchKB = async () => {
     if (!kbSearch.trim()) return
-    setKbSearching(true); setKbSearchRes([])
+    setKbSearching(true); setKbSearchRes([]); setKbSelectedDoc(null)
     try {
       const r = await fetch(`${API}/api/v1/knowledge/search`, {
         method: 'POST', headers: { ...hdrs(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: kbSearch, n_results: 8 }),
+        body: JSON.stringify({ query: kbSearch, n_results: 20 }),
       })
       if (r.ok) { const d = await r.json(); setKbSearchRes(d.results || []) }
     } catch {} finally { setKbSearching(false) }
@@ -314,6 +359,18 @@ export default function EngineerDashboardPage() {
     if (msg.sender_id === currentUserId) return 'mine'
     if (msg.sender_role === 'manager')   return 'manager-msg'
     return 'other'
+  }
+
+  // Deduplicate KB results by doc_id
+  const dedupeKB = (results: KBResult[]) => {
+    const seen = new Map<string, KBResult>()
+    results.forEach(r => {
+      const key = r.doc_id || r.title
+      if (!seen.has(key) || r.cosine_similarity > seen.get(key)!.cosine_similarity) {
+        seen.set(key, r)
+      }
+    })
+    return Array.from(seen.values())
   }
 
   const openTickets     = tickets.filter(t => t.status !== 'resolved')
@@ -434,6 +491,9 @@ export default function EngineerDashboardPage() {
         .chat-send:hover{background:var(--grn-lt)}
         .chat-send:disabled{background:var(--brd);cursor:not-allowed}
         .online-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 4px var(--ok);display:inline-block}
+        .kb-doc-row{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--brd);cursor:pointer;transition:background .1s}
+        .kb-doc-row:hover{background:var(--bg-sun)}
+        .kb-doc-row.active{background:var(--grn-w);border-left:3px solid var(--grn)}
       `}</style>
 
       <div className="shell">
@@ -452,7 +512,6 @@ export default function EngineerDashboardPage() {
             </div>
           </div>
 
-          {/* Team info block in sidebar */}
           {teamInfo && (
             <div className="sb-team">
               <div style={{ fontSize: 9, color: 'rgba(255,255,255,.35)', fontFamily: '"JetBrains Mono",monospace', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 4 }}>My Team</div>
@@ -473,9 +532,9 @@ export default function EngineerDashboardPage() {
           <div style={{ marginTop: 8 }}>
             <div className="nav-lbl">Work</div>
             {([
-              { id: 'queue',   label: 'Ticket Queue',   icon: 'inbox' },
-              { id: 'kb',      label: 'Knowledge Base', icon: 'book'  },
-              { id: 'history', label: 'History',        icon: 'clock' },
+              { id: 'queue',   label: 'Ticket Queue',   },
+              { id: 'kb',      label: 'Knowledge Base', },
+              { id: 'history', label: 'History',        },
             ] as const).map(n => (
               <div key={n.id} className={`nav-item ${tab === n.id ? 'active' : ''}`} onClick={() => setTab(n.id)}>
                 {n.id === 'queue' && <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>}
@@ -486,7 +545,6 @@ export default function EngineerDashboardPage() {
               </div>
             ))}
 
-            {/* Team Chat nav item — only if in a team */}
             {teamInfo && (
               <>
                 <div className="nav-lbl" style={{ marginTop: 8 }}>Team</div>
@@ -494,9 +552,7 @@ export default function EngineerDashboardPage() {
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
                   Team Chat
                   {chatConnected && tab === 'chat' && (
-                    <span className="nav-badge" style={{ background: 'rgba(26,122,74,.3)', color: 'rgba(255,255,255,.8)' }}>
-                      {onlineCount} online
-                    </span>
+                    <span className="nav-badge" style={{ background: 'rgba(26,122,74,.3)', color: 'rgba(255,255,255,.8)' }}>{onlineCount} online</span>
                   )}
                 </div>
               </>
@@ -514,7 +570,6 @@ export default function EngineerDashboardPage() {
 
         {/* ── MAIN ── */}
         <div className="main">
-          {/* Topbar */}
           <div className="topbar">
             <div className="crumbs">
               <span>NexusDesk</span>
@@ -545,7 +600,6 @@ export default function EngineerDashboardPage() {
             <button className="btn btn-g btn-sm" onClick={() => { localStorage.clear(); window.location.replace('/auth/login') }}>Sign out</button>
           </div>
 
-          {/* ── CONTENT ── */}
           <div className="content" style={{ height: 'calc(100vh - 48px)', overflowY: 'hidden' }}>
 
             {/* ── QUEUE TAB ── */}
@@ -555,9 +609,9 @@ export default function EngineerDashboardPage() {
                   {stats && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 1, background: 'var(--brd)', borderBottom: '1px solid var(--brd)', flexShrink: 0 }}>
                       {[
-                        { l: 'Active',    v: stats.active_tickets,         c: 'var(--warn)' },
-                        { l: 'This Week', v: stats.this_week_resolved,      c: 'var(--ok)'   },
-                        { l: 'Total',     v: stats.total_resolved,           c: 'var(--grn)'  },
+                        { l: 'Active',    v: stats.active_tickets,          c: 'var(--warn)' },
+                        { l: 'This Week', v: stats.this_week_resolved,       c: 'var(--ok)'   },
+                        { l: 'Total',     v: stats.total_resolved,            c: 'var(--grn)'  },
                         { l: 'SLA',       v: `${stats.sla_compliance_rate}%`, c: 'var(--ok)'  },
                         { l: 'Avg',       v: `${stats.avg_resolution_time}m`, c: '#2a6bab'    },
                       ].map((s, i) => (
@@ -568,14 +622,12 @@ export default function EngineerDashboardPage() {
                       ))}
                     </div>
                   )}
-
                   <div className="fbar">
                     <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--fg-mute)', fontFamily: '"JetBrains Mono",monospace', textTransform: 'uppercase', letterSpacing: '.06em' }}>Queue</span>
                     <span className="pill">{openTickets.length} open</span>
                     <span className="grow" />
                     <button className="btn btn-sm" onClick={fetchData}>↻ Refresh</button>
                   </div>
-
                   <div style={{ flex: 1, overflowY: 'auto' }}>
                     <table className="dt">
                       <thead>
@@ -686,7 +738,9 @@ export default function EngineerDashboardPage() {
                               <span className="dot dot-grn" />
                               <span className="sec-lbl" style={{ margin: 0 }}>AI Diagnosis</span>
                             </div>
-                            <div style={{ padding: '10px 14px', fontSize: 12, lineHeight: 1.7, color: 'var(--fg-dim)' }}>{selected.ai_diagnosis}</div>
+                            <div style={{ padding: '10px 14px' }}>
+                              <KBContent text={selected.ai_diagnosis} />
+                            </div>
                           </div>
                         )}
 
@@ -712,9 +766,9 @@ export default function EngineerDashboardPage() {
                           <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
                             {kbLoading ? (
                               <div className="kb-c" style={{ textAlign: 'center' }}>Searching knowledge base...</div>
-                            ) : kbResults.length === 0 ? (
+                            ) : dedupeKB(kbResults).length === 0 ? (
                               <div className="kb-c muted" style={{ textAlign: 'center' }}>No relevant KB articles found</div>
-                            ) : kbResults.map((r, i) => (
+                            ) : dedupeKB(kbResults).map((r, i) => (
                               <div key={i} style={{ background: 'var(--bg-sun)', border: '1px solid var(--brd)', borderLeft: `3px solid ${simColor(r.cosine_similarity)}`, borderRadius: 4, padding: '8px 10px' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                                   <span style={{ fontSize: 12, fontWeight: 600, flex: 1, marginRight: 8 }}>{r.title}</span>
@@ -722,10 +776,16 @@ export default function EngineerDashboardPage() {
                                     {r.cosine_similarity}% {simLabel(r.cosine_similarity)}
                                   </span>
                                 </div>
-                                <div className="small muted mono" style={{ marginBottom: 4 }}>{r.filename}</div>
-                                <div style={{ fontSize: 11, color: 'var(--fg-dim)', lineHeight: 1.6, display: kbExpanded === i ? 'block' : '-webkit-box', WebkitLineClamp: kbExpanded === i ? undefined : 2, WebkitBoxOrient: 'vertical' as any, overflow: kbExpanded === i ? 'visible' : 'hidden' }}>
-                                  {r.content}
-                                </div>
+                                <div className="small muted mono" style={{ marginBottom: 6 }}>{r.filename}</div>
+                                {r.summary ? (
+                                  <div style={{ fontSize: 11, color: 'var(--fg-dim)', lineHeight: 1.6, display: kbExpanded === i ? 'block' : '-webkit-box', WebkitLineClamp: kbExpanded === i ? undefined : 3, WebkitBoxOrient: 'vertical' as any, overflow: kbExpanded === i ? 'visible' : 'hidden', whiteSpace: 'pre-wrap' }}>
+                                    {r.summary}
+                                  </div>
+                                ) : (
+                                  <div style={{ fontSize: 11, color: 'var(--fg-dim)', lineHeight: 1.6, display: kbExpanded === i ? 'block' : '-webkit-box', WebkitLineClamp: kbExpanded === i ? undefined : 2, WebkitBoxOrient: 'vertical' as any, overflow: kbExpanded === i ? 'visible' : 'hidden' }}>
+                                    {r.content}
+                                  </div>
+                                )}
                                 <button onClick={() => setKbExpanded(kbExpanded === i ? null : i)} style={{ fontSize: 10, color: 'var(--grn)', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', marginTop: 4, padding: 0 }}>
                                   {kbExpanded === i ? 'Show less ↑' : 'Read more ↓'}
                                 </button>
@@ -764,42 +824,79 @@ export default function EngineerDashboardPage() {
 
             {/* ── KB TAB ── */}
             {tab === 'kb' && (
-              <div style={{ height: '100%', overflowY: 'auto', padding: 16 }}>
-                <div style={{ maxWidth: 760, margin: '0 auto' }}>
-                  <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Knowledge Base</div>
-                    <div className="small muted">Semantic search across all IT documentation and resolved tickets</div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                    <input placeholder="Search docs..." value={kbSearch} onChange={e => setKbSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && searchKB()} style={{ flex: 1 }} />
+              <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                {/* Search bar */}
+                <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--brd)', background: 'var(--bg-elev)', flexShrink: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Knowledge Base</div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input placeholder="Search docs... e.g. 'EC2 unreachable', 'Netskope routing'" value={kbSearch} onChange={e => setKbSearch(e.target.value)} onKeyDown={e => e.key === 'Enter' && searchKB()} style={{ flex: 1 }} />
                     <button className="btn btn-p" onClick={searchKB} disabled={kbSearching || !kbSearch.trim()}>
-                      {kbSearching ? 'Searching...' : 'Search'}
+                      {kbSearching ? '...' : 'Search'}
                     </button>
                   </div>
-                  {kbSearchRes.length > 0 && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      <div className="small muted">{kbSearchRes.length} results for "{kbSearch}"</div>
-                      {kbSearchRes.map((r, i) => (
-                        <div key={i} className="card" style={{ borderLeft: `3px solid ${simColor(r.cosine_similarity)}` }}>
-                          <div className="c-head">
-                            <div style={{ flex: 1 }}>
-                              <div style={{ fontWeight: 600, fontSize: 13 }}>{r.title}</div>
-                              <div className="small muted mono">{r.filename}</div>
-                            </div>
-                            <span className="pill" style={{ background: `${simColor(r.cosine_similarity)}18`, color: simColor(r.cosine_similarity), border: 'none' }}>
-                              {r.cosine_similarity}% {simLabel(r.cosine_similarity)}
-                            </span>
-                          </div>
-                          <div style={{ padding: '10px 14px', fontSize: 12, color: 'var(--fg-dim)', lineHeight: 1.7 }}>{r.content}</div>
+                </div>
+
+                {/* Split: list + detail */}
+                <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+                  {/* Left list */}
+                  <div style={{ width: kbSelectedDoc ? 280 : '100%', flexShrink: 0, borderRight: kbSelectedDoc ? '1px solid var(--brd)' : 'none', overflowY: 'auto', background: 'var(--bg-elev)' }}>
+                    {kbSearchRes.length === 0 && !kbSearching && (
+                      <div style={{ padding: '48px 20px', textAlign: 'center', color: 'var(--fg-mute)' }}>
+                        <div style={{ fontSize: 24, marginBottom: 8 }}>📖</div>
+                        <div style={{ fontWeight: 500, fontSize: 13 }}>Search the knowledge base</div>
+                        <div className="small muted" style={{ marginTop: 4 }}>Type a query and press Enter</div>
+                      </div>
+                    )}
+                    {kbSearching && <div style={{ padding: 32, textAlign: 'center', color: 'var(--fg-mute)', fontSize: 12 }}>Searching...</div>}
+                    {dedupeKB(kbSearchRes).map((r, i) => (
+                      <div key={i}
+                        className={`kb-doc-row${kbSelectedDoc?.doc_id === r.doc_id ? ' active' : ''}`}
+                        onClick={() => { setKbSelectedDoc(kbSelectedDoc?.doc_id === r.doc_id ? null : r) }}>
+                        <div style={{ width: 3, height: 32, borderRadius: 2, background: simColor(r.cosine_similarity), flexShrink: 0 }}/>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.title}</div>
+                          <div style={{ fontSize: 10, color: 'var(--fg-mute)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: '"JetBrains Mono",monospace' }}>{r.filename}</div>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                  {kbSearchRes.length === 0 && !kbSearching && (
-                    <div className="card" style={{ padding: '48px 24px', textAlign: 'center' }}>
-                      <div style={{ fontSize: 28, marginBottom: 8 }}>📖</div>
-                      <div style={{ fontWeight: 600, marginBottom: 4 }}>Search the knowledge base</div>
-                      <div className="small muted">Type a query above and press Enter</div>
+                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: simColor(r.cosine_similarity), fontFamily: '"JetBrains Mono",monospace' }}>{r.cosine_similarity}%</div>
+                          <div style={{ fontSize: 9, color: simColor(r.cosine_similarity), textTransform: 'uppercase' }}>{simLabel(r.cosine_similarity)}</div>
+                        </div>
+                        <div style={{ color: 'var(--fg-faint)', fontSize: 14 }}>›</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Right detail */}
+                  {kbSelectedDoc && (
+                    <div style={{ flex: 1, overflowY: 'auto', background: 'var(--bg-elev)' }}>
+                      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--brd)', position: 'sticky', top: 0, background: 'var(--bg-elev)', zIndex: 5 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                          <div style={{ flex: 1, marginRight: 10 }}>
+                            <div style={{ fontWeight: 700, fontSize: 13 }}>{kbSelectedDoc.title}</div>
+                            <div style={{ fontSize: 10, color: 'var(--fg-mute)', fontFamily: '"JetBrains Mono",monospace', marginTop: 2 }}>{kbSelectedDoc.filename}</div>
+                          </div>
+                          <button className="btn btn-sm btn-g" onClick={() => setKbSelectedDoc(null)}>✕</button>
+                        </div>
+                      </div>
+                      <div style={{ padding: '14px 16px' }}>
+                        {kbSelectedDoc.summary ? (
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                              <span className="dot dot-grn"/>
+                              <span className="sec-lbl" style={{ margin: 0 }}>AI-Generated Summary</span>
+                            </div>
+                            <div style={{ fontSize: 13, color: 'var(--fg-dim)', lineHeight: 1.8, whiteSpace: 'pre-wrap', background: 'var(--bg-sun)', padding: '12px 14px', borderRadius: 6, border: '1px solid var(--brd)' }}>
+                              {kbSelectedDoc.summary}
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ padding: '32px 0', textAlign: 'center', color: 'var(--fg-mute)' }}>
+                            <div style={{ fontSize: 20, marginBottom: 8 }}>✨</div>
+                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 4 }}>No AI summary available</div>
+                            <div className="small muted">Uploaded before summary generation was added.</div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -853,8 +950,6 @@ export default function EngineerDashboardPage() {
             {/* ── CHAT TAB ── */}
             {tab === 'chat' && (
               <div className="chat-shell">
-
-                {/* Team info header */}
                 {teamInfo && (
                   <div style={{ padding: '10px 16px', background: 'var(--bg-elev)', borderBottom: '1px solid var(--brd)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
                     <div style={{ width: 32, height: 32, borderRadius: 6, background: 'var(--grn)', color: '#fff', display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
@@ -877,8 +972,6 @@ export default function EngineerDashboardPage() {
                     </div>
                   </div>
                 )}
-
-                {/* Messages */}
                 <div className="chat-msgs">
                   {chatMessages.length === 0 && (
                     <div style={{ textAlign: 'center', color: 'var(--fg-mute)', fontSize: 12, marginTop: 60 }}>
@@ -902,8 +995,6 @@ export default function EngineerDashboardPage() {
                   })}
                   <div ref={chatBottom}/>
                 </div>
-
-                {/* Input */}
                 <div className="chat-input-row">
                   <input
                     className="chat-inp"
@@ -927,7 +1018,6 @@ export default function EngineerDashboardPage() {
         </div>
       </div>
 
-      {/* Toast */}
       {toast && (
         <div className="toast-tray">
           <div className="toast">

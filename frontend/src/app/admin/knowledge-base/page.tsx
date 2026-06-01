@@ -132,6 +132,13 @@ export default function KnowledgeBasePage() {
     catch { return iso }
   }
 
+  const fileTypeIcon = (filename: string) => {
+    if (filename.endsWith('.pdf'))  return '📄'
+    if (filename.endsWith('.docx')) return '📝'
+    if (filename.endsWith('.md'))   return '📋'
+    return '📃'
+  }
+
   return (
     <>
       <style>{CSS}</style>
@@ -140,10 +147,10 @@ export default function KnowledgeBasePage() {
         {/* Stats row */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10 }}>
           {[
-            { l: 'Indexed Docs',     v: docs.length,                                        d: 'in knowledge base' },
-            { l: 'Auto-indexed',     v: docs.filter(d => d.uploaded_by_role === 'engineer_auto').length, d: 'from resolved tickets' },
-            { l: 'Manual Uploads',   v: docs.filter(d => d.uploaded_by_role !== 'engineer_auto').length, d: 'by admin / engineer' },
-            { l: 'Total Chunks',     v: docs.reduce((s, d) => s + d.chunk_count, 0),         d: 'indexed text segments' },
+            { l: 'Indexed Docs',     v: docs.length,                                                      d: 'in knowledge base' },
+            { l: 'Auto-indexed',     v: docs.filter(d => d.uploaded_by_role === 'engineer_auto').length,  d: 'from resolved tickets' },
+            { l: 'Manual Uploads',   v: docs.filter(d => d.uploaded_by_role !== 'engineer_auto').length,  d: 'by admin / engineer' },
+            { l: 'Total Chunks',     v: docs.reduce((s, d) => s + d.chunk_count, 0),                      d: 'indexed text segments' },
           ].map((s, i) => (
             <div key={i} className="card" style={{ padding: '12px 16px' }}>
               <div style={{ fontSize: 10, color: '#6b6b6b', textTransform: 'uppercase', letterSpacing: '.08em', fontFamily: '"JetBrains Mono",monospace', fontWeight: 600 }}>{s.l}</div>
@@ -153,15 +160,19 @@ export default function KnowledgeBasePage() {
           ))}
         </div>
 
-        {success && <div style={{ padding: '8px 14px', background: '#e6f4ed', border: '1px solid #1a7a4a', borderRadius: 4, color: '#1a7a4a', fontSize: 12, display: 'flex', justifyContent: 'space-between' }}>{success}<button onClick={() => setSuccess('')} style={{ background: 'none', border: 'none', color: '#1a7a4a', cursor: 'pointer' }}>×</button></div>}
+        {success && (
+          <div style={{ padding: '8px 14px', background: '#e6f4ed', border: '1px solid #1a7a4a', borderRadius: 4, color: '#1a7a4a', fontSize: 12, display: 'flex', justifyContent: 'space-between' }}>
+            {success}
+            <button onClick={() => setSuccess('')} style={{ background: 'none', border: 'none', color: '#1a7a4a', cursor: 'pointer' }}>×</button>
+          </div>
+        )}
 
-        {/* Search + Documents */}
+        {/* Documents */}
         <div className="card">
           <div className="c-head">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#174D38" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
             <h3>Documents</h3>
             <span className="grow" />
-            {/* Test query */}
             <div className="row" style={{ gap: 6 }}>
               <input placeholder="Test query..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSearch()} style={{ width: 200 }} />
               <button className="btn btn-sm" onClick={handleSearch} disabled={searching}>{searching ? '...' : 'Search'}</button>
@@ -209,14 +220,19 @@ export default function KnowledgeBasePage() {
                 <tr><td colSpan={6} style={{ textAlign: 'center', padding: 40, color: '#6b6b6b' }}>
                   <div style={{ fontSize: 28, marginBottom: 8 }}>📚</div>
                   <div style={{ fontWeight: 600, marginBottom: 4 }}>No documents yet</div>
-                  <div style={{ fontSize: 12 }}>Upload PDFs, TXT or Markdown files to build the RAG knowledge base.</div>
+                  <div style={{ fontSize: 12 }}>Upload PDF, TXT, Markdown or Word (.docx) files to build the RAG knowledge base.</div>
                 </td></tr>
               ) : docs.map(doc => (
                 <tr key={doc.id}>
                   <td>
-                    <div style={{ fontWeight: 500 }}>{doc.title}</div>
-                    <div className="tiny muted mono">{doc.filename}</div>
-                    {doc.description && <div className="tiny muted" style={{ marginTop: 2 }}>{doc.description}</div>}
+                    <div className="row">
+                      <span style={{ fontSize: 16 }}>{fileTypeIcon(doc.filename)}</span>
+                      <div>
+                        <div style={{ fontWeight: 500 }}>{doc.title}</div>
+                        <div className="tiny muted mono">{doc.filename}</div>
+                        {doc.description && <div className="tiny muted" style={{ marginTop: 2 }}>{doc.description}</div>}
+                      </div>
+                    </div>
                   </td>
                   <td><span className="pill">{DOMAINS.find(d => d.v === doc.domain)?.l || doc.domain}</span></td>
                   <td>
@@ -242,18 +258,21 @@ export default function KnowledgeBasePage() {
               <div className="c-head" style={{ background: '#174D38', borderRadius: '6px 6px 0 0', borderBottom: 'none' }}>
                 <h3 style={{ color: '#fff' }}>Upload Document</h3>
                 <span className="grow" />
-                <span style={{ fontSize: 11, color: 'rgba(255,255,255,.5)' }}>PDF, TXT, Markdown · Max 20MB</span>
+                <span style={{ fontSize: 11, color: 'rgba(255,255,255,.5)' }}>PDF · TXT · Markdown · Word · Max 20MB</span>
                 <button className="btn btn-sm btn-g" style={{ color: 'rgba(255,255,255,.7)' }} onClick={() => setShowUpload(false)}>✕</button>
               </div>
               <form onSubmit={handleUpload} style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {error && <div style={{ padding: '8px 12px', background: '#f5eaea', border: '1px solid #4D1717', borderRadius: 4, color: '#4D1717', fontSize: 12 }}>{error}</div>}
+                {error && (
+                  <div style={{ padding: '8px 12px', background: '#f5eaea', border: '1px solid #4D1717', borderRadius: 4, color: '#4D1717', fontSize: 12 }}>{error}</div>
+                )}
                 <div>
                   <label className="lbl">File</label>
-                  <input ref={fileRef} type="file" accept=".pdf,.txt,.md" />
+                  <input ref={fileRef} type="file" accept=".pdf,.txt,.md,.docx" />
+                  <div style={{ fontSize: 10, color: '#6b6b6b', marginTop: 4 }}>Supported: .pdf, .txt, .md, .docx</div>
                 </div>
                 <div>
                   <label className="lbl">Title</label>
-                  <input placeholder="e.g. SSL Certificate Troubleshooting Guide" value={form.title} onChange={e => setForm(f => ({ ...f, title: e.target.value }))} required />
+                  <input placeholder="e.g. Netskope DNS Routing Troubleshooting Guide" value={form.title} onChange={e => setForm(f => ({ ...f, title: e.target.value }))} required />
                 </div>
                 <div>
                   <label className="lbl">Domain</label>

@@ -1,15 +1,4 @@
 {
-  "8cb3be31-0023-4263-87cc-387d717ff5e9": {
-    "id": "8cb3be31-0023-4263-87cc-387d717ff5e9",
-    "title": "SSL Certificate Troubleshooting Guide",
-    "filename": "SSL Certificate Troubleshooting Guide.pdf",
-    "domain": "networking",
-    "description": "ERR_CERT_EXPIRED means your SSL certificate has passed its expiry date.\r\nTo fix: log into your certificate authority portal, renew the certificate,\r\nthen run: sudo certbot renew or reissue from your CA dashboard.\r\nAfter renewal, restart your web server: sudo systemctl restart nginx",
-    "uploaded_by": "a5e9b33b-a8f7-453f-acfe-27d89278c634",
-    "uploaded_by_role": "admin",
-    "chunk_count": 1,
-    "created_at": "2026-04-19T16:27:40.838686"
-  },
   "0f58cf66-5985-471a-9cff-969b12542ee5": {
     "id": "0f58cf66-5985-471a-9cff-969b12542ee5",
     "title": "Resolved: Security issue \u2014 20/4/2026",
@@ -19,18 +8,8 @@
     "uploaded_by": "4e70f408-36e3-486e-87ac-0ead289b23da",
     "uploaded_by_role": "engineer_auto",
     "chunk_count": 1,
-    "created_at": "2026-04-20T10:06:18.979404"
-  },
-  "de3d1fbd-c9b0-4243-a7fc-a6276ef1a746": {
-    "id": "de3d1fbd-c9b0-4243-a7fc-a6276ef1a746",
-    "title": "aws troubleshooting ",
-    "filename": "aws_ec2_troubleshooting.txt",
-    "domain": "networking",
-    "description": "",
-    "uploaded_by": "a5e9b33b-a8f7-453f-acfe-27d89278c634",
-    "uploaded_by_role": "admin",
-    "chunk_count": 2,
-    "created_at": "2026-04-21T09:06:00.694370"
+    "created_at": "2026-04-20T10:06:18.979404",
+    "summary": "**What this document covers:**\n\nThis document details the resolution of an SSL certificate error (ERR_CERT_EXPIRED) that occurred on the company portal despite the certificate appearing valid. The issue was resolved by renewing the certificate through Let's Encrypt and restarting the web server.\n\n**Key technical points:**\n\n\u2022 Error presented as ERR_CERT_EXPIRED in browsers even though certificate appeared unexpired\n\u2022 Initial troubleshooting included verifying certificate validity and system time without success\n\u2022 Resolution involved running `certbot renew` on the server to obtain a new certificate\n\u2022 Nginx web server was restarted using `systemctl restart nginx` to apply the new certificate\n\u2022 New certificate valid for 90 days (standard Let's Encrypt duration)\n\n**When to use this document:**\n\nReference this when users report ERR_CERT_EXPIRED errors on web portals where basic certificate validity checks don't reveal obvious expiration. This is particularly relevant for Let's Encrypt certificates that may have renewal issues or where the certificate chain needs to be refreshed even if the expiration date appears current."
   },
   "0112a2d5-ceb4-4a6f-ac43-951d64b47655": {
     "id": "0112a2d5-ceb4-4a6f-ac43-951d64b47655",
@@ -41,18 +20,8 @@
     "uploaded_by": "43a3bde2-b344-4882-ac91-4f99d41fe309",
     "uploaded_by_role": "engineer_auto",
     "chunk_count": 1,
-    "created_at": "2026-04-24T16:50:44.632347"
-  },
-  "5911d993-3a63-4037-af7c-891940c6f1d3": {
-    "id": "5911d993-3a63-4037-af7c-891940c6f1d3",
-    "title": "AWS S3 Cross-Region Replication Failure and IAM Troubleshooting Guide",
-    "filename": "DOMAIN_ Cloud.txt",
-    "domain": "cloud",
-    "description": "",
-    "uploaded_by": "a5e9b33b-a8f7-453f-acfe-27d89278c634",
-    "uploaded_by_role": "admin",
-    "chunk_count": 3,
-    "created_at": "2026-05-04T14:32:00.903961"
+    "created_at": "2026-04-24T16:50:44.632347",
+    "summary": "**Document Summary: Jenkins Pipeline Deadlock Resolution**\n\nWhat this document covers:\nThis document details the resolution of a critical Jenkins outage where all pipelines became stuck in a queued state due to a deadlock in the pipeline executor plugin, blocking all code deployments with 150+ builds pending.\n\nKey technical points:\n\u2022 Thread dump analysis revealed multiple executor threads in BLOCKED state caused by lock contention in the pipeline executor plugin\n\u2022 Resolution required aborting all running and queued builds through both Jenkins UI and script console to release locked executors\n\u2022 A controlled Jenkins service restart was necessary to clear the thread deadlock and reset executor state\n\u2022 Root cause was traced to a recently updated pipeline-related plugin; fix involved rolling back to a stable version or applying a compatible update\n\u2022 Recovery was validated by triggering test pipelines and confirming proper executor allocation and release\n\nWhen to use this document:\nUse this document when facing Jenkins pipeline deadlocks where builds remain indefinitely queued and executors fail to release locks. The outlined diagnostic and recovery steps apply to situations where thread dumps show BLOCKED executor threads and pipeline executor plugin issues are suspected."
   },
   "64a5f895-4897-439e-8fb4-8e648d561b26": {
     "id": "64a5f895-4897-439e-8fb4-8e648d561b26",
@@ -63,28 +32,31 @@
     "uploaded_by": "1c261b35-39e0-442e-b235-714eb30b64e2",
     "uploaded_by_role": "engineer_auto",
     "chunk_count": 1,
-    "created_at": "2026-05-04T14:34:06.921543"
+    "created_at": "2026-05-04T14:34:06.921543",
+    "summary": "**What this document covers:**\nThis document addresses AWS S3 cross-region replication failures between Mumbai and Singapore regions caused by IAM role permission errors, preventing 2TB of critical backup data from syncing and compromising disaster recovery capabilities.\n\n**Key technical points:**\n\u2022 Replication failure occurs despite bucket versioning being enabled, with AccessDenied errors on the IAM cross-region replication role\n\u2022 Verify replication configuration using `aws s3api get-bucket-replication` to check role ARN, destination bucket, and rule settings\n\u2022 Enable and monitor S3 replication metrics in CloudWatch, specifically OperationsFailedReplication counts to confirm failed object replications\n\u2022 Root cause likely involves IAM role permissions, trust policies, or KMS encryption key access issues\n\u2022 Resolution requires escalation to engineer with full IAM access to audit role configurations and review CloudTrail logs for specific permission denials\n\n**When to use this document:**\nUse this when experiencing S3 cross-region replication failures with permission-related errors that persist despite verifying bucket versioning and basic configuration. Apply when initial troubleshooting steps haven't resolved the issue and IAM/KMS permission auditing is needed to restore business continuity."
   },
-  "57582312-8c5e-4ae0-afdc-f10d519c167f": {
-    "id": "57582312-8c5e-4ae0-afdc-f10d519c167f",
-    "title": "netskope",
-    "filename": "ticket_netskope_resolved.txt.pdf",
+  "cf91d16f-2f20-4f24-8d6e-d75f9e2b1b30": {
+    "id": "cf91d16f-2f20-4f24-8d6e-d75f9e2b1b30",
+    "title": "AWS EC2 instance unreachable troubleshooting guide",
+    "filename": "KEDB_Cloud_EC2_Instance_Unreachable.pdf",
     "domain": "networking",
     "description": "",
     "uploaded_by": "a5e9b33b-a8f7-453f-acfe-27d89278c634",
     "uploaded_by_role": "admin",
-    "chunk_count": 2,
-    "created_at": "2026-05-31T15:51:55.248590"
+    "chunk_count": 7,
+    "summary": "**AWS EC2 Instance Unreachable Troubleshooting Guide Summary**\n\nThis document provides systematic troubleshooting procedures for diagnosing and resolving AWS EC2 instances that become unreachable or unresponsive, covering both infrastructure and application-level failures.\n\nKey technical points:\n\n\u2022 Common symptoms include failed CloudWatch status checks (system or instance), HTTP 502/503/504 errors, SSH timeouts, and resource exhaustion (CPU, memory, or disk at 90-100%)\n\n\u2022 Root causes fall into four categories: resource exhaustion (runaway processes, memory leaks, disk full), AWS hardware failures, security group/network ACL misconfigurations, and application crashes with failed restart policies\n\n\u2022 Diagnostic workflow progresses through EC2 console status checks, CloudWatch metrics analysis, SSH connectivity testing, application log review, and load balancer health verification\n\n\u2022 Primary resolutions include instance reboot (first attempt for unresponsive instances), stop/start cycle (fixes underlying hardware issues but changes public IP), and disk cleanup procedures using df, du, and journalctl commands\n\n\u2022 Document specifies 30-minute response and 2-hour resolution SLA for critical production issues, with 3-5 incidents occurring monthly\n\nUse this guide when EC2 instances become unreachable, applications stop responding, or CloudWatch alerts indicate failed status checks or resource saturation.",
+    "created_at": "2026-05-31T20:07:37.674421"
   },
-  "f7ad21d9-131d-4a72-ad6a-124d580e287c": {
-    "id": "f7ad21d9-131d-4a72-ad6a-124d580e287c",
-    "title": "KEDB NETWORK ",
-    "filename": "KEDB Document_ Network Flow Over Netskope VPN _ Secure Access Architecture.pdf",
+  "280eb4aa-813f-421d-ad18-34a2c1eb6e62": {
+    "id": "280eb4aa-813f-421d-ad18-34a2c1eb6e62",
+    "title": "Netskope DNS Routing Troubleshooting Guide",
+    "filename": "KEDB_Netskope_Troubleshooting (1).docx",
     "domain": "networking",
     "description": "",
     "uploaded_by": "a5e9b33b-a8f7-453f-acfe-27d89278c634",
     "uploaded_by_role": "admin",
-    "chunk_count": 3,
-    "created_at": "2026-05-31T16:03:21.708291"
+    "chunk_count": 11,
+    "summary": "**SUMMARY: Netskope DNS Routing Troubleshooting Guide**\n\nThis document explains how Netskope cloud security platform routes traffic through DNS interception and provides diagnostic steps for resolving connectivity issues when traffic fails to tunnel correctly.\n\n**Key Technical Points:**\n\n\u2022 Netskope intercepts DNS queries and resolves steered domains to gateway IPs in the 191.x.x.x range. Any other IP range (103.x, 52.x, 104.x, etc.) indicates traffic is bypassing the Netskope tunnel.\n\n\u2022 When routing breaks, DNS resolves to public CDN IPs instead of Netskope gateways, causing Netskope's access policy to block direct connections and making applications appear inaccessible.\n\n\u2022 Most common root cause is stale DNS cache retaining pre-Netskope IP resolutions. Other causes include client disconnection, domains missing from steering policy, split tunnel misconfigurations, and VPN conflicts.\n\n\u2022 Primary diagnostic steps: verify client connection status, run DNS lookup (host/nslookup) to check if domain resolves to 191.x.x.x range, and perform mobile hotspot isolation test to rule out network-specific issues.\n\n\u2022 VPN and Netskope conflicts occur when both are active simultaneously, with VPN potentially overriding Netskope's DNS interception through interface priority or routing tables.\n\n**When to Use:**\n\nUse this guide when troubleshooting application connectivity issues for users with Netskope client installed, particularly when applications are unreachable despite showing Connected status or when verifying correct traffic routing through Netskope POPs.",
+    "created_at": "2026-06-01T06:12:26.039837"
   }
 }

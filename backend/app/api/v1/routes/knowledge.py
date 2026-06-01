@@ -28,6 +28,16 @@ class SearchRequest(BaseModel):
     domain: Optional[str] = None
 
 
+ALLOWED_EXTENSIONS = (".pdf", ".txt", ".md", ".docx")
+ALLOWED_TYPES = [
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+]
+
+
 @router.post("/upload")
 async def upload_doc(
     file: UploadFile = File(...),
@@ -36,9 +46,9 @@ async def upload_doc(
     description: str = Form(""),
     current_user: User = Depends(admin_or_engineer),
 ):
-    if not (file.filename.endswith((".pdf", ".txt", ".md")) or
-            file.content_type in ["application/pdf", "text/plain", "text/markdown"]):
-        raise HTTPException(status_code=400, detail="Only PDF, TXT, MD files accepted")
+    if not (any(file.filename.lower().endswith(ext) for ext in ALLOWED_EXTENSIONS) or
+            file.content_type in ALLOWED_TYPES):
+        raise HTTPException(status_code=400, detail="Only PDF, TXT, MD, DOCX files accepted")
     contents = await file.read()
     if len(contents) > 20 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large. Max 20MB.")
