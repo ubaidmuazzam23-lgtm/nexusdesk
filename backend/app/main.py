@@ -50,3 +50,8 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+# ── Start Slack Bot ───────────────────────────────────────────────────────────
+from app.services.slack_service import start_slack_bot
+start_slack_bot()

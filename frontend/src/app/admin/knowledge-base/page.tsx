@@ -67,6 +67,9 @@ export default function KnowledgeBasePage() {
   const [success, setSuccess]     = useState('')
   const [error, setError]         = useState('')
   const [form, setForm]           = useState({ title: '', domain: 'networking', description: '' })
+  const [showUrlUpload, setShowUrlUpload] = useState(false)
+  const [urlForm, setUrlForm]     = useState({ url: '', title: '', domain: 'networking', description: '' })
+  const [uploadingUrl, setUploadingUrl] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<any[]>([])
   const [searching, setSearching] = useState(false)
@@ -83,6 +86,27 @@ export default function KnowledgeBasePage() {
       const r = await fetch(`${API}/api/v1/knowledge/documents${p}`, { headers: hdrs() })
       if (r.ok) setDocs(await r.json())
     } catch {} finally { setLoading(false) }
+  }
+
+  const handleUrlUpload = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!urlForm.url.trim()) { setError('URL required'); return }
+    if (!urlForm.title.trim()) { setError('Title required'); return }
+    setUploadingUrl(true); setError('')
+    try {
+      const r = await fetch(`${API}/api/v1/knowledge/upload-url`, {
+        method: 'POST',
+        headers: { ...hdrs(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(urlForm),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.detail || d.error || 'Failed')
+      setSuccess(`"${d.title}" — ${d.chunk_count} chunks indexed from URL.`)
+      setShowUrlUpload(false)
+      setUrlForm({ url: '', title: '', domain: 'networking', description: '' })
+      fetchDocs()
+    } catch (err: any) { setError(err.message) }
+    finally { setUploadingUrl(false) }
   }
 
   const handleUpload = async (e: React.FormEvent) => {
@@ -133,9 +157,10 @@ export default function KnowledgeBasePage() {
   }
 
   const fileTypeIcon = (filename: string) => {
-    if (filename.endsWith('.pdf'))  return '📄'
-    if (filename.endsWith('.docx')) return '📝'
-    if (filename.endsWith('.md'))   return '📋'
+    if (filename.startsWith('http')) return '🌐'
+    if (filename.endsWith('.pdf'))   return '📄'
+    if (filename.endsWith('.docx'))  return '📝'
+    if (filename.endsWith('.md'))    return '📋'
     return '📃'
   }
 
@@ -177,7 +202,8 @@ export default function KnowledgeBasePage() {
               <input placeholder="Test query..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSearch()} style={{ width: 200 }} />
               <button className="btn btn-sm" onClick={handleSearch} disabled={searching}>{searching ? '...' : 'Search'}</button>
             </div>
-            <button className="btn btn-sm btn-p" onClick={() => { setShowUpload(true); setError('') }}>+ Upload</button>
+            <button className="btn btn-sm" onClick={() => { setShowUrlUpload(true); setError('') }}>+ Add URL</button>
+            <button className="btn btn-sm btn-p" onClick={() => { setShowUpload(true); setError('') }}>+ Upload File</button>
           </div>
 
           {/* Search results */}
@@ -250,6 +276,46 @@ export default function KnowledgeBasePage() {
             </tbody>
           </table>
         </div>
+
+        {/* URL Upload Modal */}
+        {showUrlUpload && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(20,20,20,.4)', zIndex: 100, display: 'grid', placeItems: 'center', backdropFilter: 'blur(2px)' }} onClick={() => setShowUrlUpload(false)}>
+            <div className="kb card" onClick={e => e.stopPropagation()} style={{ width: 500, overflow: 'hidden', boxShadow: '0 12px 32px rgba(0,0,0,.14)' }}>
+              <div className="c-head" style={{ background: '#174D38', borderRadius: '6px 6px 0 0', borderBottom: 'none' }}>
+                <h3 style={{ color: '#fff' }}>Add URL</h3>
+                <span className="grow" />
+                <span style={{ fontSize: 11, color: 'rgba(255,255,255,.5)' }}>Notion · Confluence · Any public page</span>
+                <button className="btn btn-sm btn-g" style={{ color: 'rgba(255,255,255,.7)' }} onClick={() => setShowUrlUpload(false)}>✕</button>
+              </div>
+              <form onSubmit={handleUrlUpload} style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {error && <div style={{ padding: '8px 12px', background: '#f5eaea', border: '1px solid #4D1717', borderRadius: 4, color: '#4D1717', fontSize: 12 }}>{error}</div>}
+                <div>
+                  <label className="lbl">URL</label>
+                  <input placeholder="https://notion.site/your-runbook or any public page URL" value={urlForm.url} onChange={e => setUrlForm(f => ({ ...f, url: e.target.value }))} required />
+                  <div style={{ fontSize: 10, color: '#6b6b6b', marginTop: 4 }}>Works with Notion, Confluence, GitHub Wiki, or any public webpage</div>
+                </div>
+                <div>
+                  <label className="lbl">Title</label>
+                  <input placeholder="e.g. DNS Troubleshooting Runbook" value={urlForm.title} onChange={e => setUrlForm(f => ({ ...f, title: e.target.value }))} required />
+                </div>
+                <div>
+                  <label className="lbl">Domain</label>
+                  <select value={urlForm.domain} onChange={e => setUrlForm(f => ({ ...f, domain: e.target.value }))}>
+                    {DOMAINS.filter(d => d.v !== 'all').map(d => <option key={d.v} value={d.v}>{d.l}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="lbl">Description (optional)</label>
+                  <textarea rows={2} placeholder="Brief description..." value={urlForm.description} onChange={e => setUrlForm(f => ({ ...f, description: e.target.value }))} />
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" className="btn" style={{ flex: 1 }} onClick={() => setShowUrlUpload(false)}>Cancel</button>
+                  <button type="submit" className="btn btn-p" style={{ flex: 2 }} disabled={uploadingUrl}>{uploadingUrl ? 'Fetching & Indexing...' : 'Add URL →'}</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
 
         {/* Upload Modal */}
         {showUpload && (
