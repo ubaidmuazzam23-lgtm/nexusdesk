@@ -530,16 +530,20 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
     # Triggers when user says an app/URL/site is unreachable, not loading, not responding
     url_keywords = [
         "can't access", "cannot access", "cant access",
-        "not accessible", "not reachable", "unreachable",
+        "can't reach", "cannot reach", "cant reach",
+        "not reachable", "unreachable", "not accessible",
         "not loading", "won't load", "wont load", "page not loading",
-        "not responding", "not opening",
-        "unable to access", "unable to open",
+        "not responding", "not opening", "won't open", "wont open",
+        "unable to access", "unable to open", "unable to reach",
         "site not found", "page not found",
-        "website not", "webpage not",
+        "url not", "website not", "webpage not",
         "application not loading", "app not loading",
+        "is not accessible", "is not reachable", "is not loading",
         "http://", "https://", ".com", ".internal", ".corp",
-        "netskope", "nslookup", "191.x.x.x",
+        "netskope", "nslookup", "191.", "dns",
         "err_name_not_resolved", "dns_probe", "err_connection",
+        "404", "502", "503", "connection refused", "timed out",
+        "connection error", "cannot connect", "can't connect",
     ]
     all_msgs_lower = " ".join(m["content"].lower() for m in session["messages"])
     is_url_scenario = any(kw in all_msgs_lower for kw in url_keywords)
