@@ -25,6 +25,12 @@ class Settings(BaseSettings):
 
     ANTHROPIC_API_KEY: str = ""
 
+    SLACK_BOT_TOKEN:     str = ""
+    SLACK_APP_TOKEN:     str = ""
+    SLACK_SIGNING_SECRET: str = ""
+    NOTION_API_TOKEN: str = ""
+ 
+
     FRONTEND_URL: str = "http://localhost:3000"
     AI_SERVICES_URL: str = "http://localhost:8001"
 

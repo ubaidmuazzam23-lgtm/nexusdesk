@@ -9,7 +9,7 @@ from app.core.database import get_db
 from app.core.dependencies import require_role, get_current_user
 from app.models.user import User, UserRole
 from app.services.knowledge_service import (
-    upload_document, search_knowledge, list_documents,
+    upload_document, upload_url, search_knowledge, list_documents,
     delete_document, get_similar_docs_for_ticket,
 )
 
@@ -36,6 +36,28 @@ ALLOWED_TYPES = [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/msword",
 ]
+
+
+class UrlUploadRequest(BaseModel):
+    url: str
+    title: str
+    domain: str = "networking"
+    description: str = ""
+
+
+@router.post("/upload-url")
+def upload_url_endpoint(
+    data: UrlUploadRequest,
+    current_user: User = Depends(admin_or_engineer),
+):
+    return upload_url(
+        url               = data.url,
+        title             = data.title,
+        domain            = data.domain,
+        description       = data.description,
+        uploaded_by       = str(current_user.id),
+        uploaded_by_role  = current_user.role.value,
+    )
 
 
 @router.post("/upload")

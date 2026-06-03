@@ -233,16 +233,18 @@ Domain: {domain}
 Document content:
 {text}
 
-Write a clear, structured summary for engineers. Include:
-1. What this document covers (1-2 sentences)
-2. Key technical points (3-5 bullet points)
-3. When to use this document (1-2 sentences)
+Write a thorough, structured summary for engineers. Include:
+1. What this document covers (2-3 sentences)
+2. Key technical concepts explained (4-6 bullet points with enough detail to be useful)
+3. All diagnostic steps or commands mentioned (as bullet points)
+4. Resolution approaches covered (as bullet points)
+5. When to use this document (1-2 sentences)
 
-Keep it concise — under 200 words. Use plain text, no markdown headers."""
+Aim for 300-400 words. Be specific — include actual commands, IP ranges, thresholds, and technical details from the document. Use plain text only, no markdown headers or bold."""
 
         resp = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=400,
+            max_tokens=1000,
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.content[0].text.strip()
@@ -267,6 +269,246 @@ def _save_meta(meta: dict):
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
+
+def _extract_notion_page_id(url: str) -> str:
+    """Extract Notion page ID from any Notion URL format."""
+    import re as _re
+    # Match 32-char hex at end of path (before ? or end)
+    match = _re.search(r"([0-9a-f]{32})(?:\?|$)", url)
+    if match:
+        raw = match.group(1)
+        return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+    # Already formatted with dashes
+    match = _re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", url)
+    if match:
+        return match.group(1)
+    raise ValueError(f"Could not extract Notion page ID from URL: {url}")
+
+
+def _fetch_notion_content(url: str) -> str:
+    """Fetch content from Notion page using the Notion API."""
+    import urllib.request
+    import json as _json
+
+    from app.core.config import settings
+    token = getattr(settings, "NOTION_API_TOKEN", "") or ""
+    if not token:
+        raise ValueError("NOTION_API_TOKEN not configured. Add it to .env to fetch Notion pages.")
+
+    page_id = _extract_notion_page_id(url)
+
+    headers_api = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+
+    def api_get(endpoint: str) -> dict:
+        req = urllib.request.Request(
+            f"https://api.notion.com/v1/{endpoint}",
+            headers=headers_api,
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read().decode("utf-8"))
+
+    def api_post(endpoint: str, body: dict) -> dict:
+        data = _json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"https://api.notion.com/v1/{endpoint}",
+            data=data,
+            headers=headers_api,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read().decode("utf-8"))
+
+    def extract_rich_text(rich_text_list: list) -> str:
+        return "".join(rt.get("plain_text", "") for rt in rich_text_list)
+
+    def block_to_text(block: dict) -> str:
+        btype = block.get("type", "")
+        data  = block.get(btype, {})
+        lines = []
+
+        if btype in ("paragraph", "quote", "callout"):
+            text = extract_rich_text(data.get("rich_text", []))
+            if text.strip():
+                lines.append(text)
+
+        elif btype in ("heading_1", "heading_2", "heading_3"):
+            text = extract_rich_text(data.get("rich_text", []))
+            prefix = {"heading_1": "# ", "heading_2": "## ", "heading_3": "### "}.get(btype, "")
+            if text.strip():
+                lines.append(f"\n{prefix}{text}")
+
+        elif btype in ("bulleted_list_item", "numbered_list_item", "to_do"):
+            text = extract_rich_text(data.get("rich_text", []))
+            if text.strip():
+                lines.append(f"• {text}")
+
+        elif btype == "code":
+            text = extract_rich_text(data.get("rich_text", []))
+            lang = data.get("language", "")
+            if text.strip():
+                lines.append(f"```{lang}\n{text}\n```")
+
+        elif btype == "table_row":
+            cells = data.get("cells", [])
+            row   = " | ".join(extract_rich_text(cell) for cell in cells)
+            if row.strip():
+                lines.append(row)
+
+        elif btype == "divider":
+            lines.append("---")
+
+        return "\n".join(lines)
+
+    # Fetch all blocks with pagination
+    all_blocks = []
+    cursor     = None
+    while True:
+        params = f"page_size=100"
+        if cursor:
+            params += f"&start_cursor={cursor}"
+        result = api_get(f"blocks/{page_id}/children?{params}")
+        all_blocks.extend(result.get("results", []))
+        if not result.get("has_more"):
+            break
+        cursor = result.get("next_cursor")
+
+    # Convert blocks to text
+    text_parts = []
+    for block in all_blocks:
+        text = block_to_text(block)
+        if text.strip():
+            text_parts.append(text)
+
+        # Fetch children for blocks that have them (tables, toggles etc.)
+        if block.get("has_children"):
+            try:
+                children = api_get(f"blocks/{block['id']}/children?page_size=100")
+                for child in children.get("results", []):
+                    child_text = block_to_text(child)
+                    if child_text.strip():
+                        text_parts.append(child_text)
+            except Exception:
+                pass
+
+    full_text = "\n\n".join(text_parts)
+    full_text = re.sub(r"\n{3,}", "\n\n", full_text)
+    return full_text.strip()
+
+
+def fetch_url_content(url: str) -> str:
+    """
+    Fetch and extract clean text from any URL.
+    Notion pages use the Notion API.
+    All other URLs use web scraping.
+    """
+    import urllib.request
+    import html as html_module
+
+    # Notion — use API
+    if "notion.so" in url or "notion.site" in url:
+        return _fetch_notion_content(url)
+
+    # Generic web scraping for all other URLs
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+
+    try:
+        req  = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw_html = resp.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        raise ValueError(f"Could not fetch URL: {e}")
+
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(raw_html, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header", "meta", "noscript"]):
+            tag.decompose()
+        main = soup.find("main") or soup.find("article") or soup.find("body")
+        text = main.get_text(separator="\n", strip=True) if main else soup.get_text(separator="\n", strip=True)
+    except ImportError:
+        text = re.sub(r"<script[^>]*>.*?</script>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html_module.unescape(text)
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    text  = "\n".join(lines)
+    text  = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def upload_url(
+    url: str,
+    title: str,
+    domain: str,
+    description: str,
+    uploaded_by: str,
+    uploaded_by_role: str = "admin",
+) -> dict:
+    """Fetch a URL and index its content into the knowledge base."""
+    try:
+        text = fetch_url_content(url)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    if not text.strip():
+        return {"success": False, "error": "Could not extract text from URL — page may be empty or require login"}
+
+    chunks     = _chunk_text(text)
+    embedder   = _get_embedder()
+    embeddings = embedder.encode(chunks).tolist()
+    collection = _get_collection()
+
+    doc_id    = str(uuid.uuid4())
+    ids       = [f"{doc_id}_{i}" for i in range(len(chunks))]
+    metadatas = [
+        {"doc_id": doc_id, "domain": domain, "title": title, "chunk_index": i, "source_url": url}
+        for i in range(len(chunks))
+    ]
+
+    collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+
+    summary = _generate_summary(text[:8000], title, domain)
+
+    meta = _load_meta()
+    meta[doc_id] = {
+        "id":               doc_id,
+        "title":            title,
+        "filename":         url,
+        "source_url":       url,
+        "domain":           domain,
+        "description":      description,
+        "uploaded_by":      uploaded_by,
+        "uploaded_by_role": uploaded_by_role,
+        "chunk_count":      len(chunks),
+        "summary":          summary,
+        "created_at":       datetime.utcnow().isoformat(),
+        "source_type":      "url",
+    }
+    _save_meta(meta)
+
+    print(f"\n  🌐 KB URL: '{title}' — {len(chunks)} chunks [{uploaded_by_role}]")
+    return {
+        "success":     True,
+        "doc_id":      doc_id,
+        "title":       title,
+        "chunk_count": len(chunks),
+        "summary":     summary,
+        "message":     f"'{title}' indexed from URL — {len(chunks)} chunks.",
+    }
+
 
 def upload_document(
     content: bytes,
@@ -296,7 +538,7 @@ def upload_document(
     collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
 
     # Generate AI summary
-    summary = _generate_summary(text[:4000], title, domain)
+    summary = _generate_summary(text[:8000], title, domain)
 
     meta = _load_meta()
     meta[doc_id] = {
