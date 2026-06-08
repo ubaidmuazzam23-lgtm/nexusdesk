@@ -101,7 +101,14 @@ export default function KnowledgeBasePage() {
       })
       const d = await r.json()
       if (!r.ok) throw new Error(d.detail || d.error || 'Failed')
-      setSuccess(`"${d.title}" — ${d.chunk_count} chunks indexed from URL.`)
+      // Use urlForm.title as fallback if d.title is undefined
+      const docTitle = d.title || urlForm.title || 'Document'
+      const chunkCount = d.chunk_count !== undefined ? d.chunk_count : (d.chunks !== undefined ? d.chunks : 0)
+      if (chunkCount === 0) {
+        setError('No content could be extracted from this URL. The page may require login or be empty.')
+        return
+      }
+      setSuccess(`"${docTitle}" — ${chunkCount} chunks indexed from URL.`)
       setShowUrlUpload(false)
       setUrlForm({ url: '', title: '', domain: 'networking', description: '' })
       fetchDocs()
@@ -122,7 +129,9 @@ export default function KnowledgeBasePage() {
       const r = await fetch(`${API}/api/v1/knowledge/upload`, { method: 'POST', headers: hdrs(), body: fd })
       const d = await r.json()
       if (!r.ok) throw new Error(d.detail || 'Failed')
-      setSuccess(`"${d.title}" — ${d.chunk_count} chunks indexed.`)
+      const docTitle = d.title || form.title || 'Document'
+      const chunkCount = d.chunk_count !== undefined ? d.chunk_count : (d.chunks !== undefined ? d.chunks : '?')
+      setSuccess(`"${docTitle}" — ${chunkCount} chunks indexed.`)
       setShowUpload(false)
       setForm({ title: '', domain: 'networking', description: '' })
       if (fileRef.current) fileRef.current.value = ''
@@ -157,6 +166,7 @@ export default function KnowledgeBasePage() {
   }
 
   const fileTypeIcon = (filename: string) => {
+    if (!filename) return '📃'
     if (filename.startsWith('http')) return '🌐'
     if (filename.endsWith('.pdf'))   return '📄'
     if (filename.endsWith('.docx'))  return '📝'
@@ -254,7 +264,7 @@ export default function KnowledgeBasePage() {
                     <div className="row">
                       <span style={{ fontSize: 16 }}>{fileTypeIcon(doc.filename)}</span>
                       <div>
-                        <div style={{ fontWeight: 500 }}>{doc.title}</div>
+                        <div style={{ fontWeight: 500 }}>{doc.title || 'Untitled'}</div>
                         <div className="tiny muted mono">{doc.filename}</div>
                         {doc.description && <div className="tiny muted" style={{ marginTop: 2 }}>{doc.description}</div>}
                       </div>

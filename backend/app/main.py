@@ -55,3 +55,7 @@ async def health():
 # ── Start Slack Bot ───────────────────────────────────────────────────────────
 from app.services.slack_service import start_slack_bot
 start_slack_bot()
+
+# ── Start URL Auto-Refresh Scheduler ─────────────────────────────────────────
+from app.services.knowledge_service import start_url_refresh_scheduler
+start_url_refresh_scheduler()

@@ -480,7 +480,8 @@ def upload_url(
 
     collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
 
-    summary = _generate_summary(text[:8000], title, domain)
+    summary      = _generate_summary(text[:8000], title, domain)
+    content_hash = _content_hash(text)
 
     meta = _load_meta()
     meta[doc_id] = {
@@ -494,6 +495,8 @@ def upload_url(
         "uploaded_by_role": uploaded_by_role,
         "chunk_count":      len(chunks),
         "summary":          summary,
+        "content_hash":     content_hash,
+        "last_refreshed":   datetime.utcnow().isoformat(),
         "created_at":       datetime.utcnow().isoformat(),
         "source_type":      "url",
     }
@@ -644,8 +647,12 @@ def get_similar_docs_for_ticket(
 
 def get_rag_context(query: str, domain: Optional[str] = None, n_results: int = 3) -> str:
     try:
+        collection = _get_collection()
+        if collection.count() == 0:
+            return ""
+
         result = search_knowledge(query=query, n_results=n_results, domain=domain)
-        hits   = [r for r in result.get("results", []) if r["cosine_similarity"] >= 45]
+        hits   = [r for r in result.get("results", []) if r["cosine_similarity"] >= 30]
         if not hits:
             return ""
 
@@ -658,15 +665,142 @@ def get_rag_context(query: str, domain: Optional[str] = None, n_results: int = 3
             print(f"      Similarity: {hit['cosine_similarity']}%")
         print("  " + chr(9472)*52 + "\n")
 
-        context = "\n\n--- Relevant Knowledge Base Articles ---\n"
-        for i, hit in enumerate(hits[:3], 1):
-            context += f"\n[{i}] {hit['title']} (relevance: {hit['cosine_similarity']}%)\n"
-            context += hit["content"][:500] + "...\n"
+        # Return ALL chunks from EVERY matched document in full — AI reads complete runbook
+        seen_docs = set()
+        context   = "\n\n--- Knowledge Base ---\n"
+        for hit in hits:
+            doc_id = hit.get("doc_id", "")
+            if doc_id and doc_id not in seen_docs:
+                seen_docs.add(doc_id)
+                try:
+                    all_chunks = collection.get(
+                        where={"doc_id": doc_id},
+                        include=["documents", "metadatas"]
+                    )
+                    if all_chunks and all_chunks["documents"]:
+                        context += f"\n[{hit['title']}]\n"
+                        # Sort by chunk_index so document is read in order
+                        chunks_with_idx = list(zip(
+                            all_chunks["documents"],
+                            all_chunks["metadatas"]
+                        ))
+                        chunks_with_idx.sort(key=lambda x: x[1].get("chunk_index", 0))
+                        for doc_text, _ in chunks_with_idx:
+                            context += doc_text + "\n\n"
+                except Exception:
+                    context += f"\n[{hit['title']}]\n{hit['content']}\n\n"
         context += "\n--- End Knowledge Base ---\n"
         return context
 
     except Exception:
         return ""
+
+
+# ── URL Auto-Refresh ─────────────────────────────────────────────────────────
+
+import hashlib
+import threading
+
+def _content_hash(text: str) -> str:
+    """Generate hash of content to detect changes."""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _refresh_url_document(doc_id: str, meta_entry: dict) -> bool:
+    """
+    Re-fetch a URL document and re-index if content has changed.
+    Returns True if content was updated, False if unchanged.
+    """
+    url = meta_entry.get("source_url") or meta_entry.get("filename", "")
+    if not url or not url.startswith("http"):
+        return False
+
+    try:
+        text = fetch_url_content(url)
+        if not text.strip():
+            print(f"  ⚠ Auto-refresh: empty content from {url}")
+            return False
+
+        new_hash = _content_hash(text)
+        old_hash = meta_entry.get("content_hash", "")
+
+        if new_hash == old_hash:
+            return False  # No change
+
+        # Content changed — re-index
+        print(f"  🔄 Auto-refresh: '{meta_entry['title']}' content changed — re-indexing")
+
+        chunks     = _chunk_text(text)
+        embedder   = _get_embedder()
+        embeddings = embedder.encode(chunks).tolist()
+        collection = _get_collection()
+
+        # Delete old chunks
+        try:
+            old_results = collection.get(where={"doc_id": doc_id})
+            if old_results["ids"]:
+                collection.delete(ids=old_results["ids"])
+        except Exception:
+            pass
+
+        # Add new chunks
+        ids       = [f"{doc_id}_{i}" for i in range(len(chunks))]
+        metadatas = [
+            {"doc_id": doc_id, "domain": meta_entry["domain"],
+             "title": meta_entry["title"], "chunk_index": i, "source_url": url}
+            for i in range(len(chunks))
+        ]
+        collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+
+        # Regenerate summary
+        summary = _generate_summary(text[:8000], meta_entry["title"], meta_entry["domain"])
+
+        # Update metadata
+        meta = _load_meta()
+        if doc_id in meta:
+            meta[doc_id]["chunk_count"]   = len(chunks)
+            meta[doc_id]["summary"]       = summary
+            meta[doc_id]["content_hash"]  = new_hash
+            meta[doc_id]["last_refreshed"] = datetime.utcnow().isoformat()
+            _save_meta(meta)
+
+        print(f"  ✅ Auto-refresh: '{meta_entry['title']}' — {len(chunks)} chunks re-indexed")
+        return True
+
+    except Exception as e:
+        print(f"  ⚠ Auto-refresh error for '{meta_entry.get('title')}': {e}")
+        return False
+
+
+def _auto_refresh_loop():
+    """Background thread — checks all URL documents for changes every 2 minutes."""
+    import time
+    while True:
+        time.sleep(120)  # Check every 2 minutes
+        try:
+            meta = _load_meta()
+            url_docs = {
+                doc_id: entry for doc_id, entry in meta.items()
+                if entry.get("source_type") == "url" or
+                   (entry.get("filename", "").startswith("http"))
+            }
+            if not url_docs:
+                continue
+            print(f"  🔄 Auto-refresh: checking {len(url_docs)} URL documents for changes")
+            updated = 0
+            for doc_id, entry in url_docs.items():
+                if _refresh_url_document(doc_id, entry):
+                    updated += 1
+            print(f"  🔄 Auto-refresh complete: {updated}/{len(url_docs)} documents updated")
+        except Exception as e:
+            print(f"  ⚠ Auto-refresh loop error: {e}")
+
+
+def start_url_refresh_scheduler():
+    """Start the background URL refresh scheduler."""
+    thread = threading.Thread(target=_auto_refresh_loop, daemon=True)
+    thread.start()
+    print("  ⏰ URL auto-refresh scheduler started (checks every 2 minutes for changes)")
 
 
 # ── List / Delete ─────────────────────────────────────────────────────────────

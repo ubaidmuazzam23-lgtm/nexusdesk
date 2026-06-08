@@ -1,12 +1,21 @@
 # Location: backend/app/services/chat_service.py
 #
-# CLEAN REWRITE — signal-based 4-phase flow, single Claude call, low latency
+# REWRITE — Flow-based, RAG-driven, no hardcoded domain logic
 #
-# PHASES:
-#   INTAKE  → AI asks questions until it says [READY_TO_SOLVE]
-#   SOLVE   → AI gives solutions, up to 3 attempts, then says [NEEDS_ENGINEER]
-#   TRIAGE  → Asset Q&A — real values from DB, pinpoints exact asset
-#   ESCALATE→ Ticket created, routed to asset owner or domain fallback
+# FLOW (from diagram):
+#   START → Is something actively broken?
+#     YES → Is it customer impacting?
+#       YES → More than 1 customer? → YES → ITSM Major Incident
+#                                   → NO  → AI Analysis (RAG)
+#       NO  → AI Analysis (RAG)
+#     NO  → Consult/question flow → deadline check → AI Analysis (RAG)
+#
+#   AI Analysis:
+#     Search Notion/Confluence runbooks
+#     Answer from runbook content only
+#     Try to resolve
+#     Still not resolved → Is it a networking issue? → YES → raise ticket
+#                                                    → NO  → redirect
 
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -42,100 +51,65 @@ VALID_DOMAINS = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SYSTEM PROMPT — single call, signal-based phase control
+# SYSTEM PROMPT — RAG-driven, flow-based
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an IT support specialist at NexusDesk.
+SYSTEM_PROMPT = """You are a Network IT support specialist. You ONLY handle networking issues.
 
 STRICT FORMATTING:
-- Plain sentences only. No bullet points, no markdown, no asterisks, no dashes as bullets.
+- Plain sentences only. No bullet points, no markdown, no asterisks.
+- Never use markdown links like [text](url) — write URLs as plain text only.
 - Under 150 words per response.
 - One question at a time.
 - Never start with "Certainly", "Absolutely", "Of course", "Great".
 
-YOUR PHASES — follow in order:
+KNOWLEDGE BASE PRIORITY:
+- If knowledge base content is provided → read it fully and follow the most relevant procedure.
+- If no knowledge base content is relevant → use your own networking expertise.
+- Always try to solve the issue.
 
-PHASE 1 — INTAKE:
-Ask focused questions one at a time to fully understand the problem before attempting any fix.
-Gather: what system/app, what error message, how long, who else is affected, what they tried.
-Keep asking until you have enough context to give a specific targeted solution.
-When ready to solve, end your reply with the signal: [READY_TO_SOLVE]
+DNS / NETSKOPE DETECTION — CRITICAL:
+Whenever conversation contains ANY of these signals:
+- "site can't be reached", "this site can't be reached"
+- "ERR_NAME_NOT_RESOLVED", "cannot resolve host", "could not find host"
+- "connection error" for a specific URL or application
+- Any specific URL or domain name that is not accessible
+- "cannot access" any specific application or URL
 
-PHASE 2 — SOLVE:
-You now have context. Give ONE specific targeted solution per response.
-Each attempt must try something meaningfully different.
+IMMEDIATELY run this DNS check flow — do NOT ask generic questions:
+Step 1: Ask user to run DNS check:
+  Mac/Linux: host <url>
+  Windows: nslookup <url>
+Step 2: Analyse result:
+  - IP starts with 191.x.x.x → Netskope routing correct, check app layer
+  - Any other IP (103.x, 52.x, 142.x etc.) → "DNS is resolving to [IP] instead of 191.x.x.x — this is a Netskope routing issue. Please disconnect and reconnect Netskope, then run the DNS check again."
+  - NXDOMAIN or cannot resolve → DNS zone issue, check BIND9 and zone files
 
-PHASE 3 — DO NOT handle. The system will take over.
+PLACEHOLDERS: Ask for real values when you see <placeholder> in runbook. Never show placeholders.
 
-Also always end your reply with this on a new line:
-<meta>{"domain":"DOMAIN","severity":"SEVERITY"}</meta>
+COMMANDS: Always show Mac/Linux AND Windows versions for every command.
+
+Also always end your reply with:
+<meta>{"domain":"DOMAIN","severity":"SEVERITY","is_networking":"true/false"}</meta>
 
 Domain: networking, hardware, software, security, email_communication, identity_access,
         database, cloud, infrastructure, devops, erp_business_apps, endpoint_management, other
 Severity: critical (production/all users), high (user blocked), medium (degraded), low (question)
+is_networking: true if this is clearly a networking issue, false if not
 
-If the user says something is fixed, reply warmly and briefly. End with <meta>{"domain":"...","severity":"low"}</meta>
+If the user says something is fixed, reply warmly and briefly."""
 
-IMPORTANT: Never use [NEEDS_ENGINEER]. The system escalates automatically after 3 solve attempts.
+FLOW_PROMPT = """You are a Network IT support specialist running a structured triage flow.
 
-─────────────────────────────────────────────────────────────────────────────
-SPECIAL PROTOCOL — URL / APPLICATION ACCESS ISSUES
-─────────────────────────────────────────────────────────────────────────────
-CRITICAL: The product name is "Netskope" — spelled with a lowercase k, NOT "NetScope".
-Always write "Netskope" in every message. Never write "NetScope".
+CURRENT FLOW STEP: {step}
 
-When a user cannot access a URL, website, or application, use this EXACT flow.
-SKIP the normal intake→solve×3→triage flow entirely for these issues.
+STRICT RULES:
+- Ask ONLY the question for the current step.
+- Under 80 words.
+- Plain text only.
+- Never start with "Certainly", "Absolutely", "Of course".
 
-STEP 1 — Ask about Netskope (first message only):
-"Are you trying to access this through Netskope?
-  A) Yes
-  B) No
-  C) Not sure / Maybe"
-
-STEP 2 — Ask OS and run DNS check (regardless of Yes/No/Maybe):
-Ask: "What OS are you on? (Windows / Mac / Linux)"
-Then give the command:
-  Windows: nslookup <URL>
-  Mac/Linux: host <URL>
-Ask them to paste the full output.
-
-STEP 3 — Analyze the resolved IP:
-
-IF IP starts with 191.x.x.x:
-  Regardless of Yes/No/Maybe answer about Netskope:
-  Say: "DNS is resolving to 191.x.x.x — this is the correct routing range,
-  so DNS is working properly. This is not a DNS issue."
-  Then do up to 2 targeted troubleshooting steps:
-    - Different browser / incognito mode
-    - Clear cache and cookies
-    - Check VPN status if required for this app
-    - Try from a different network (mobile hotspot)
-  After 2 attempts if still unresolved, end reply with [READY_TO_SOLVE]
-
-IF IP is anything else (103.x, 141.x, 172.x, 10.x, or DNS fails):
-  IF user said YES or MAYBE to Netskope:
-    Say: "DNS is resolving to [IP] instead of the expected 191.x.x.x range.
-    This indicates a Netskope routing issue."
-    Fix attempts:
-      1. Disconnect and reconnect Netskope, run dig again
-      2. Flush DNS cache (sudo dscacheutil -flushcache on Mac, ipconfig /flushdns on Windows)
-
-  IF user said NO to Netskope:
-    Say: "DNS is resolving to [IP] — this indicates a DNS routing issue on your network."
-    Fix attempts:
-      1. Flush DNS cache (sudo dscacheutil -flushcache on Mac, ipconfig /flushdns on Windows), then run dig again
-      2. Try accessing from a different network like mobile hotspot — if it works there, the issue is on your office network
-  After 2 attempts if still unresolved, end reply with [READY_TO_SOLVE]
-
-IMPORTANT: For this protocol, [READY_TO_SOLVE] means route to triage, not more solving.
-End with [READY_TO_SOLVE] as soon as 2 fix attempts fail.
-
-DETECTION — trigger when user says:
-"can't access", "cannot open", "URL not working", "website down", "not loading",
-"can't reach", "browser error", "site not found", "ERR_NAME_NOT_RESOLVED",
-"403", "404", "502", "503", "connection refused", "timed out accessing"
-─────────────────────────────────────────────────────────────────────────────"""
+Always end with: <meta>{{"domain":"networking","severity":"{severity}","is_networking":"true"}}</meta>"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -145,333 +119,674 @@ DETECTION — trigger when user says:
 def _get_session(sid: str) -> dict:
     if sid not in _sessions:
         _sessions[sid] = {
-            "messages":          [],
-            "phase":             "intake",   # intake → solve → triage → done
-            "solve_attempts":    0,
-            "domain":            None,
-            "severity":          None,
-            "problem":           "",
-
-            # Triage state
-            "triage_active":     False,
-            "triage_questions":  [],
-            "triage_q_index":    0,
-            "triage_answers":    [],
-            "triage_filters":    {},
-            "triage_rows":       [],        # candidate asset rows from DB
-            "asset_match":       None,
-            "asset_confirmed":   False,
-            "asset_context":     {},
-            "user_wants_escalate": False,
+            "messages":           [],
+            "flow_step":          "broken",     # broken → impacting → multi_customer → ai_analysis
+                                                 #        → consult → details → deadline → help_today → ai_analysis
+            "domain":             "networking",  # always networking
+            "severity":           "medium",
+            "problem":            "",
+            "rag_context":        "",
+            "solve_attempts":     0,
+            "is_networking":      True,
+            "triage_active":      False,
+            "triage_questions":   [],
+            "triage_q_index":     0,
+            "triage_answers":     [],
+            "triage_filters":     {},
+            "triage_rows":        [],
+            "asset_match":        None,
+            "asset_confirmed":    False,
+            "asset_context":      {},
             "triage_started":     False,
-            "netskope_answer":    "",
-            "netskope_triage":    False,  # True when Netskope custom triage is active
-            "netskope_triage_answered": False,
+            "mid_check_done":     False,
+            "flow_origin":        "broken",
         }
     return _sessions[sid]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SINGLE CLAUDE CALL
+# CLAUDE CALL
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _call_claude(session: dict, phase_hint: str = "") -> tuple:
-    """
-    One API call. Returns (clean_reply, domain, severity, signals).
-    signals: set of strings like {'READY_TO_SOLVE', 'NEEDS_ENGINEER'}
-    """
-    system = SYSTEM_PROMPT
-    if phase_hint:
-        system += f"\n\nCURRENT PHASE HINT: {phase_hint}"
+def _call_claude(session: dict, system: str, extra_hint: str = "") -> tuple:
+    """One API call. Returns (reply, domain, severity, is_networking)."""
+    if extra_hint:
+        system = system + f"\n\nHINT: {extra_hint}"
 
     resp = _client.messages.create(
         model      = "claude-sonnet-4-5",
-        max_tokens = 350,
+        max_tokens = 400,
         system     = system,
         messages   = session["messages"],
     )
     raw = resp.content[0].text.strip()
 
-    # Extract signals
-    signals = set()
-    if "[READY_TO_SOLVE]" in raw: signals.add("READY_TO_SOLVE")
-    if "[NEEDS_ENGINEER]" in raw:  signals.add("NEEDS_ENGINEER")
+    domain       = "networking"
+    severity     = session.get("severity") or "medium"
+    is_networking = True
 
-    # Extract meta
-    domain   = session.get("domain") or "other"
-    severity = session.get("severity") or "medium"
     m = re.search(r'<meta>(.*?)</meta>', raw, re.DOTALL)
     if m:
         try:
             data = json.loads(m.group(1).strip())
-            d = data.get("domain", "other")
+            d = data.get("domain", "networking")
             s = data.get("severity", "medium")
-            if d in VALID_DOMAINS: domain   = d
+            n = data.get("is_networking", "true")
+            if d in VALID_DOMAINS: domain = d
             if s in ["critical","high","medium","low"]: severity = s
+            is_networking = str(n).lower() != "false"
         except Exception:
             pass
 
-    # Clean reply
-    clean = re.sub(r'\[READY_TO_SOLVE\]|\[NEEDS_ENGINEER\]', '', raw)
-    clean = re.sub(r'\s*<meta>.*?</meta>', '', clean, flags=re.DOTALL).strip()
+    clean = re.sub(r'\s*<meta>.*?</meta>', '', raw, flags=re.DOTALL).strip()
+    clean = re.sub(r'\[READY_TO_SOLVE\]|\[NEEDS_ENGINEER\]', '', clean).strip()
 
-    # Always correct product name spelling regardless of what Claude generates
-    clean = re.sub(r'NetScope', 'Netskope', clean)
-    clean = re.sub(r'Netscope', 'Netskope', clean)
-    clean = re.sub(r'netscope', 'netskope', clean)
-    clean = re.sub(r'NETSCOPE', 'NETSKOPE', clean)
-
-    return clean, domain, severity, signals
+    return clean, domain, severity, is_networking
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TRIAGE HELPERS
+# RAG CONTEXT
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _start_triage(db: Session, session: dict, sid: str) -> ChatMessageResponse:
-    """Fetch real assets, generate targeted questions, start Q&A."""
-    from app.services.asset_identifier_service import generate_questions, fetch_assets
+def _get_rag(query: str) -> str:
+    """Search knowledge base for relevant runbook content."""
+    try:
+        from app.services.knowledge_service import get_rag_context
+        return get_rag_context(query, domain="networking", n_results=10)
+    except Exception:
+        return ""
 
-    domain  = session["domain"] or "other"
-    problem = session["problem"]
 
-    # Fetch candidate rows — stored in session for use during answer matching
-    rows, _ = fetch_assets(db, domain, problem)
-    session["triage_rows"] = rows
+# ─────────────────────────────────────────────────────────────────────────────
+# FLOW STEP HANDLERS
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # Generate questions based on actual asset data
-    questions = generate_questions(db, domain, problem)
+def _ask_broken(session: dict, sid: str) -> ChatMessageResponse:
+    """Step 1: Is something actively broken?"""
+    reply = "Is something actively broken right now, or do you have a question or need a consult from the network team?"
+    session["messages"].append({"role": "assistant", "content": reply})
+    session["flow_step"] = "waiting_broken"
+    return _make_response(sid, session, reply, can_escalate=False)
+
+
+def _handle_broken(session: dict, sid: str, message: str) -> Optional[ChatMessageResponse]:
+    """Handle response to 'is something broken' — use Claude to detect intent."""
+    msg = message.lower().strip()
+
+    # Direct consult signals — skip question, go straight to details
+    consult_direct = ["consult", "question", "advice", "guidance", "help with", "how do i",
+                      "wondering", "planning", "need to know", "asking about"]
+    if any(s in msg for s in consult_direct):
+        session["flow_step"] = "waiting_details"
+        reply = "What is it regarding? Please provide more detail — designs, links, screenshots, Epic tickets or any other context that would help."
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+    # Direct broken signals
+    broken_direct = ["broken", "down", "not working", "outage", "crash", "fail", "error",
+                     "can't access", "cannot access", "unreachable", "not responding"]
+    if any(s in msg for s in broken_direct):
+        session["flow_step"] = "waiting_impacting"
+        reply = "Is this customer impacting? Are end users or customers unable to access services because of this?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+    # Ambiguous — use Claude to detect intent
+    try:
+        from app.core.config import settings as _s
+        import anthropic as _a
+        _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
+        resp = _cl.messages.create(
+            model      = "claude-sonnet-4-5",
+            max_tokens = 10,
+            messages   = [{"role": "user", "content": (
+                f"Is this message reporting a broken/urgent IT issue (BROKEN) or asking a question/consult (CONSULT)? "
+                f"Reply only BROKEN or CONSULT.\nMessage: {msg}"
+            )}],
+        )
+        intent = resp.content[0].text.strip().upper()
+    except Exception:
+        intent = "BROKEN"
+
+    if "CONSULT" in intent:
+        session["flow_step"] = "waiting_details"
+        reply = "What is it regarding? Please provide more detail — designs, links, screenshots, Epic tickets or any other context that would help."
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+    else:
+        session["flow_step"] = "waiting_impacting"
+        reply = "Is this customer impacting? Are end users or customers unable to access services because of this?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+
+def _handle_impacting(session: dict, sid: str, message: str) -> ChatMessageResponse:
+    """Handle response to 'is it customer impacting'."""
+    msg = message.lower().strip()
+    yes_signals = ["yes", "yeah", "customers", "users", "impacting", "affected", "multiple",
+                   "many", "all", "everyone", "widespread"]
+
+    if any(s in msg for s in yes_signals):
+        # Customer impacting → ask how many
+        session["flow_step"] = "waiting_multi_customer"
+        reply = "Are more than one customer or user impacted by this?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+    else:
+        # Not customer impacting → ask for problem description first
+        session["flow_step"] = "waiting_problem"
+        reply = "Can you describe what's happening? What exactly is the issue?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+
+def _handle_multi_customer(session: dict, sid: str, message: str) -> ChatMessageResponse:
+    """Handle response to 'more than 1 customer'."""
+    msg = message.lower().strip()
+    yes_signals = ["yes", "yeah", "multiple", "many", "more than", "several",
+                   "all", "everyone", "widespread", "2", "3", "4", "5"]
+
+    if any(s in msg for s in yes_signals):
+        # Major incident → AI gathers info then raises CRITICAL ticket
+        session["flow_step"]   = "ai_analysis"
+        session["flow_origin"] = "major_incident"
+        session["severity"]    = "critical"
+        session["solve_attempts"] = 0
+        return _start_ai_analysis(session, sid)
+    else:
+        # Single customer → ask for problem description first
+        session["flow_step"] = "waiting_problem"
+        reply = "Can you describe what's happening? What is the customer experiencing?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+
+def _handle_consult(session: dict, sid: str, message: str) -> ChatMessageResponse:
+    """Handle consult/question flow."""
+    msg = message.lower().strip()
+    yes_signals = ["yes", "yeah", "i do", "need", "question", "consult", "help", "advice"]
+
+    if any(s in msg for s in yes_signals):
+        session["flow_step"] = "waiting_details"
+        reply = ("What is it regarding? Please provide more detail — designs, links, "
+                 "screenshots, Epic tickets or any other context that would help.")
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+    else:
+        reply = "No problem. Feel free to reach out if you need anything from the network team."
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+
+def _handle_details(session: dict, sid: str, message: str) -> ChatMessageResponse:
+    """After collecting consult details → detect deadline from description or ask."""
+    session["problem"] = message[:400]
+
+    # Use Claude to detect if deadline is already mentioned in the description
+    try:
+        from app.core.config import settings as _s
+        import anthropic as _a
+        _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
+        resp = _cl.messages.create(
+            model      = "claude-sonnet-4-5",
+            max_tokens = 10,
+            messages   = [{"role": "user", "content": (
+                f"Does this message mention a deadline, timeline, or urgency? Reply YES or NO only.\nMessage: {message}"
+            )}],
+        )
+        has_deadline_in_desc = "YES" in resp.content[0].text.upper()
+    except Exception:
+        has_deadline_in_desc = False
+
+    if has_deadline_in_desc:
+        # Deadline already mentioned — skip asking, go to need help today
+        session["flow_step"] = "waiting_help_today"
+        reply = "Do you need help with this today?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+    else:
+        session["flow_step"] = "waiting_deadline"
+        reply = "Is there a hard deadline on this request?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+
+def _handle_deadline(session: dict, sid: str, message: str) -> ChatMessageResponse:
+    """Handle deadline question — use Claude to interpret yes/no."""
+    msg = message.lower().strip()
+
+    # Use Claude to determine if user has a deadline
+    from app.core.config import settings as _s
+    import anthropic as _a
+    _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
+    try:
+        resp = _cl.messages.create(
+            model      = "claude-sonnet-4-5",
+            max_tokens = 10,
+            messages   = [{"role": "user", "content": (
+                f"Does this message indicate there IS a deadline or time constraint? "
+                f"Reply only YES or NO.\nMessage: {msg}"
+            )}],
+        )
+        has_deadline = "YES" in resp.content[0].text.upper()
+    except Exception:
+        # Fallback to keyword check
+        has_deadline = any(s in msg for s in ["yes", "yeah", "deadline", "urgent", "asap",
+                           "today", "tomorrow", "by end", "next month", "this week", "due"])
+
+    if has_deadline:
+        session["flow_step"] = "waiting_help_today"
+        reply = "Do you need help with this today?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+    else:
+        # Even with no deadline, ask if they need help today
+        session["flow_step"] = "waiting_help_today"
+        reply = "Do you need help with this today?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+
+def _handle_help_today(session: dict, sid: str, message: str) -> ChatMessageResponse:
+    """Handle 'need help today' question."""
+    msg = message.lower().strip()
+    yes_signals = ["yes", "yeah", "today", "now", "urgent", "asap", "immediately"]
+
+    if any(s in msg for s in yes_signals):
+        # Need help today → AI analysis
+        session["flow_step"]   = "ai_analysis"
+        session["flow_origin"] = "consult"
+        return _start_ai_analysis(session, sid)
+    else:
+        # Not needed today → ask combined sprint/release question
+        session["flow_step"] = "waiting_next_sprint"
+        reply = "When should the network team pick this up? (Next sprint / Next release / Next sprint and release / Specific date / No rush)"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, can_escalate=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI ANALYSIS — RAG driven
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _start_ai_analysis(session: dict, sid: str) -> ChatMessageResponse:
+    """Start AI analysis using RAG from knowledge base."""
+    session["flow_step"] = "ai_analysis"
+
+    # Get RAG context from knowledge base
+    problem = session.get("problem", "")
+    if not problem:
+        # Build problem from conversation
+        user_msgs = [m["content"] for m in session["messages"] if m["role"] == "user"]
+        problem   = " ".join(user_msgs[:3])
+
+    # Use existing RAG context if already fetched, otherwise fetch now
+    rag_context = session.get("rag_context") or _get_rag(problem)
+    session["rag_context"] = rag_context
+
+    # Build system with RAG
+    if rag_context:
+        system = (
+            "You are a Network IT support specialist handling all networking issues including DNS, BGP, OSPF, VPN, firewall, routing, switching, Netskope, and any network connectivity problems.\n\n"
+            "FORMATTING: Plain sentences only. No markdown. No asterisks. No bullet points.\n"
+            "Never use markdown links like [text](url) — write URLs as plain text only.\n"
+            "Under 150 words. One question at a time.\n"
+            "Never start with Certainly, Absolutely, Of course, Great.\n\n"
+            "COMMANDS: Always show Mac/Linux AND Windows versions for every command.\n\n"
+            "NETWORKING SCOPE: Only handle networking issues. If the issue is clearly not networking "
+            "(e.g. printer driver, HR software bug, payroll system) tell the user this is outside your scope "
+            "and suggest they contact the relevant team. Do not raise a ticket for non-networking issues.\n\n"
+            "KNOWLEDGE BASE: A runbook is provided below. Follow it exactly for issues it covers. "
+            "For issues NOT in the runbook, use your own networking expertise to troubleshoot.\n\n"
+            "CRITICAL RULE: Read the ENTIRE runbook first. Find the most relevant procedure. "
+            "Execute Step 1 of that procedure RIGHT NOW. "
+            "DO NOT ask questions not in the runbook procedure.\n\n"
+            f"{rag_context}\n\n"
+            "Now execute Step 1 of the most relevant procedure. Nothing else."
+        )
+        hint = "Execute Step 1 of the most relevant procedure from the runbook right now."
+        # Override for consult flow — don't follow troubleshooting steps
+        if session.get("flow_origin") == "major_incident":
+            n_mi = session.get("solve_attempts", 0)
+            if n_mi == 0:
+                hint = (
+                    "This is a MAJOR INCIDENT affecting multiple customers. "
+                    "Ask focused triage questions to understand scope. "
+                    "Ask: How many customers are affected and which services are down?"
+                )
+            elif n_mi == 1:
+                hint = "Ask: What is the current impact level — complete outage, degraded service, or intermittent?"
+            elif n_mi == 2:
+                hint = "Ask: When did this start and were there any recent changes or maintenance?"
+            else:
+                hint = (
+                    "You have enough information. "
+                    "Summarise the incident clearly and tell the user a CRITICAL ticket is being raised immediately. "
+                    "End with [STEPS_EXHAUSTED]."
+                )
+        elif session.get("flow_origin") == "consult":
+            remaining = max(0, 6 - session.get("solve_attempts", 0))
+            hint = (
+                f"This is a network team consultation. You have {remaining} quality exchanges remaining. "
+                f"Ask ONE focused technical question to extract maximum useful information. "
+                f"Focus on: technical details, constraints, current state, requirements, integrations. "
+                f"Do NOT mention escalation, the network team, or handing off to anyone. "
+                f"Do NOT say you will connect them with an architect or raise a request. "
+                f"Just ask the next most important technical question."
+            )
+        elif session.get("flow_origin") == "planning":
+            timeline = session.get("planning_timeline", "future")
+            remaining = max(0, 4 - session.get("solve_attempts", 0))
+            hint = (
+                f"This request is scheduled for: {timeline}. "
+                f"You have {remaining} exchanges to gather planning context for the network team. "
+                f"Ask ONE focused question about: technical scope, dependencies, blockers, "
+                f"business priority, success criteria, or contact person. "
+                f"Do NOT mention escalation or handing off. Just gather planning information."
+            )
+    else:
+        system = SYSTEM_PROMPT
+        if session.get("flow_origin") == "consult":
+            remaining = max(0, 6 - session.get("solve_attempts", 0))
+            hint = (
+                f"This is a network team consultation. You have {remaining} exchanges remaining. "
+                f"Ask ONE focused technical question to extract maximum useful information. "
+                f"Focus on: technical details, constraints, current state, requirements, integrations. "
+                f"Do NOT mention escalation, the network team, or handing off to anyone. "
+                f"Do NOT say you will connect them with an architect or raise a request. "
+                f"Just ask the next most important technical question."
+            )
+        elif session.get("flow_origin") == "planning":
+            timeline = session.get("planning_timeline", "future")
+            remaining = max(0, 4 - session.get("solve_attempts", 0))
+            hint = (
+                f"This request is scheduled for: {timeline}. "
+                f"You have {remaining} exchanges to gather planning context for the network team. "
+                f"Ask ONE focused question about: technical scope, dependencies, blockers, "
+                f"business priority, success criteria, or contact person. "
+                f"Do NOT mention escalation or handing off. Just gather planning information."
+            )
+        else:
+            hint = (
+                "No runbook found for this issue. "
+                "First verify this is a networking issue. If it is, use your own networking expertise to troubleshoot — "
+                "give one specific step. If it is clearly NOT a networking issue, tell the user politely and suggest "
+                "they contact the relevant team."
+            )
+
+    reply, domain, severity, is_networking = _call_claude(session, system, hint)
+
+    session["domain"]       = domain
+    session["severity"]     = severity
+    session["is_networking"] = is_networking
+
+    # Only count as attempt if bot gave actual fix/command, not just an info question
+    # Detect if reply contains a command or fix action
+    has_command = any(kw in reply.lower() for kw in [
+        "run this", "run the", "execute", "try this", "type this",
+        "nslookup", "ping", "flush", "restart", "reconnect", "disconnect",
+        "sudo", "ipconfig", "systemctl", "rndc", "traceroute", "host ",
+        "check if", "verify", "open terminal", "command prompt"
+    ])
+    if has_command or session.get("flow_origin") in ("consult", "planning", "major_incident"):
+        session["solve_attempts"] += 1
+
+    session["messages"].append({"role": "assistant", "content": reply})
+
+    return _make_response(sid, session, reply, can_escalate=False)
+
+
+def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageResponse:
+    """Continue AI analysis — check if resolved or needs escalation."""
+    # Check if resolved — use Claude to avoid false positives like ERR_NAME_NOT_RESOLVED
+    try:
+        from app.core.config import settings as _s
+        import anthropic as _a
+        _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
+        resp = _cl.messages.create(
+            model      = "claude-sonnet-4-5",
+            max_tokens = 10,
+            messages   = [{"role": "user", "content": (
+                f"Is the user saying their IT issue is now fixed/resolved/working? "
+                f"Reply YES or NO only. Do not say YES if they are just describing an error message.\\n"
+                f"Message: {message}"
+            )}],
+        )
+        is_resolved = "YES" in resp.content[0].text.upper()
+    except Exception:
+        is_resolved = False
+
+    if is_resolved:
+        reply = "Glad that sorted it out. Feel free to reach out if anything else comes up."
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply, resolved=True)
+
+    session["solve_attempts"] += 1
+    rag_context = session.get("rag_context", "")
+    has_runbook = bool(rag_context)
+    print(f"  [Major] flow_origin={session.get('flow_origin')} solve_attempts={session['solve_attempts']}")
+
+    if rag_context:
+        system = SYSTEM_PROMPT + (
+            f"\n\n{rag_context}\n\n"
+            "STRICT INSTRUCTION: Follow the runbook procedures exactly. "
+            "Do NOT ask questions outside of the runbook steps. "
+            "When ALL runbook steps are exhausted and issue is still not resolved, end with [STEPS_EXHAUSTED]."
+        )
+    else:
+        system = SYSTEM_PROMPT
+
+    n = session["solve_attempts"]
+    is_consult = session.get("flow_origin") == "consult"
+
+    # Consult flow — no attempt limits, no mid-check, no escalation message
+    # Just keep advising until user is satisfied, then post summary to #network-consult
+    if is_consult:
+        max_attempts = 6  # 6 exchanges then post summary to network-consult
+    else:
+        # Runbook: follow all steps until [STEPS_EXHAUSTED]
+        # No runbook: 6 attempts total
+        max_attempts = 10 if has_runbook else 6
+
+    if n >= max_attempts and not is_consult:
+        escalate = True
+        reply    = "I have exhausted all troubleshooting steps. I will now escalate this to the network engineering team."
+        session["messages"].append({"role": "assistant", "content": reply})
+    elif session.get("flow_origin") == "major_incident" and n >= 4:
+        reply = "I have gathered enough details. Raising a CRITICAL ticket immediately and notifying the network engineering team."
+        session["messages"].append({"role": "assistant", "content": reply})
+        session["domain"]   = "networking"
+        session["severity"] = "critical"
+        session["flow_step"] = "triage"
+        session["triage_started"] = True
+        return _make_response(sid, session, reply, can_escalate=True)
+    elif n >= max_attempts and is_consult:
+        # Consult — wrap up and post summary to #network-consult
+        reply = "I have gathered enough context. I will share this with the network team who will follow up with you."
+        session["messages"].append({"role": "assistant", "content": reply})
+        session["flow_step"] = "consult_complete"
+        return _make_response(sid, session, reply, can_escalate=True)
+    elif n >= 4 and session.get("flow_origin") == "planning":
+        # Planning — wrap up and post planning brief to #network-consult
+        reply = "I have all the planning details I need. I will share this with the network team so they are ready when the time comes."
+        session["messages"].append({"role": "assistant", "content": reply})
+        session["flow_step"] = "consult_complete"
+        return _make_response(sid, session, reply, can_escalate=True)
+    else:
+        # Mid-point check at attempt 3 (no runbook only, broken flow only — not consult)
+        if not has_runbook and n == 3 and not session.get("mid_check_done") and not is_consult and session.get("flow_origin") not in ("planning", "major_incident"):
+            session["mid_check_done"] = True
+            reply = (
+                "I have tried 3 troubleshooting steps so far and the issue is still not resolved. "
+                "Would you like me to try a few more steps, or shall I raise a ticket and escalate this to the network engineering team?"
+            )
+            session["messages"].append({"role": "assistant", "content": reply})
+            session["flow_step"] = "mid_check"
+            return _make_response(sid, session, reply, can_escalate=False)
+
+        # Runbook mid-check at step 5 (first 2 are usually diagnostic questions)
+        if has_runbook and n == 5 and not session.get("mid_check_done") and session.get("flow_origin") != "major_incident":
+            session["mid_check_done"] = True
+            reply = (
+                "I have gone through several troubleshooting steps and the issue is still not resolved. "
+                "Would you like me to continue with more steps, or shall I raise a ticket and escalate to the network engineering team?"
+            )
+            session["messages"].append({"role": "assistant", "content": reply})
+            session["flow_step"] = "mid_check"
+            return _make_response(sid, session, reply, can_escalate=False)
+
+        if has_runbook:
+            hint = (
+                "Follow the next step from the runbook. "
+                "If you have covered ALL steps and issue is still not resolved, "
+                "tell the user you will escalate to the network engineering team. "
+                "End your reply with [STEPS_EXHAUSTED] only when ALL runbook steps are done. "
+                "IMPORTANT: Always include a proper sentence before [STEPS_EXHAUSTED]."
+            )
+        else:
+            hint = (
+                f"Attempt {n} of 6. Give ONE specific troubleshooting step. "
+                f"Different from what was already tried."
+            )
+
+        reply, domain, severity, is_networking = _call_claude(session, system, hint)
+
+        escalate = "[STEPS_EXHAUSTED]" in reply
+        reply    = reply.replace("[STEPS_EXHAUSTED]", "").strip()
+
+        if not reply:
+            reply = "I have gone through all the troubleshooting steps. I will now escalate this to the network engineering team."
+            escalate = True
+
+        session["messages"].append({"role": "assistant", "content": reply})
+        session["domain"]        = domain
+        session["severity"]      = severity
+        session["is_networking"] = is_networking
+
+        if not escalate:
+            return _make_response(sid, session, reply, can_escalate=False)
+
+    # Escalate to triage
+    session["flow_step"]      = "triage"
+    session["triage_started"] = True
+    return _make_response(sid, session, reply, can_escalate=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRIAGE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _start_triage_db(db: Optional[Session], session: dict, sid: str) -> ChatMessageResponse:
+    """Start asset triage from DB."""
+    try:
+        if db:
+            from app.services.asset_identifier_service import generate_questions, fetch_assets
+            domain  = session["domain"] or "networking"
+            problem = session["problem"]
+            rows, _ = fetch_assets(db, domain, problem)
+            questions = generate_questions(db, domain, problem)
+            session["triage_rows"] = rows
+        else:
+            questions = ["What is the name of the affected device or system?",
+                        "What environment is this? (Production / Staging / Development)"]
+            session["triage_rows"] = []
+    except Exception:
+        questions = ["What is the name of the affected device or system?",
+                    "What environment is this? (Production / Staging / Development)"]
+        session["triage_rows"] = []
 
     session["triage_active"]    = True
     session["triage_questions"] = questions
     session["triage_q_index"]   = 1
     session["triage_answers"]   = []
     session["triage_filters"]   = {}
-    session["asset_match"]      = None
-    session["asset_confirmed"]  = False
+    session["flow_step"]        = "triage"
 
-    reply = (
-        "Before I raise a ticket I need a couple of quick details "
-        "to route this to exactly the right person.\n\n"
-        + questions[0]
-    )
-
-    return ChatMessageResponse(
-        session_id        = sid,
-        reply             = reply,
-        intent            = "context_gathering",
-        detected_domain   = domain,
-        detected_severity = session["severity"] or "medium",
-        resolved          = False,
-        can_escalate      = False,
-        attempt_number    = session["solve_attempts"],
-        context_gathering = True,
-    )
+    reply = ("Before I raise this ticket I need a couple of quick details "
+             "to route this to exactly the right engineer.\n\n" + questions[0])
+    return _make_response(sid, session, reply, can_escalate=False, context_gathering=True)
 
 
 def _handle_triage_answer(db: Session, session: dict, sid: str, answer: str) -> ChatMessageResponse:
-    """Process one triage answer, run match, ask next question or confirm."""
-    from app.services.asset_identifier_service import (
-        extract_field_from_answer,
-        progressive_match,
-    )
+    """Process one triage answer."""
+    try:
+        from app.services.asset_identifier_service import extract_field_from_answer, progressive_match
+        qi        = session["triage_q_index"]
+        questions = session["triage_questions"]
+        rows      = session["triage_rows"]
 
-    qi        = session["triage_q_index"]
-    questions = session["triage_questions"]
-    rows      = session["triage_rows"]
+        if qi > 0 and qi <= len(questions):
+            prev_q = questions[qi - 1]
+            session["triage_answers"].append(answer)
+            extracted = extract_field_from_answer(prev_q, answer, rows)
+            col = extracted.get("column")
+            val = extracted.get("value")
+            if col and val:
+                session["triage_filters"][col] = val
+                session["asset_context"][col]  = val
+                print(f"  [Triage] Filter: {col}={val}")
 
-    # Map answer to a column+value
-    if qi > 0 and qi <= len(questions):
-        prev_q = questions[qi - 1]
-        session["triage_answers"].append(answer)
+        if session["triage_filters"]:
+            result = progressive_match(db, session["triage_filters"], rows)
+            session["asset_match"] = result.get("matched")
+            candidates             = result.get("candidates", 0)
+            print(f"  [Triage] Candidates: {candidates} confident={result['confident']}")
 
-        extracted = extract_field_from_answer(prev_q, answer, rows)
-        col = extracted.get("column")
-        val = extracted.get("value")
-        if col and val:
-            session["triage_filters"][col] = val
-            session["asset_context"][col]  = val
-            print(f"  [Triage] Filter: {col}={val}")
+            if result["confident"]:
+                session["asset_confirmed"] = True
+                session["triage_active"]   = False
+                asset = result["matched"]
+                name  = asset.get("identifier") or "the asset"
+                env   = asset.get("environment") or ""
+                team  = asset.get("team") or ""
+                reply = (
+                    f"Found it. This is {name}"
+                    + (f" in the {env} environment" if env else "")
+                    + (f", owned by {team}" if team else "")
+                    + ". Raising the ticket now."
+                )
+                return _make_response(sid, session, reply, can_escalate=True)
 
-    # Check match
-    if session["triage_filters"]:
-        result = progressive_match(db, session["triage_filters"], rows)
-        session["asset_match"] = result.get("matched")
-        candidates             = result.get("candidates", 0)
+        qi = session["triage_q_index"]
+        if qi < len(questions):
+            next_q = questions[qi]
+            session["triage_q_index"] += 1
+            candidates = len([
+                r for r in rows
+                if all(v.lower() in str(r.get(c,"")).lower()
+                       for c, v in session["triage_filters"].items())
+            ]) if session["triage_filters"] else len(rows)
+            hint = f" ({candidates} possible matches)" if candidates > 1 else ""
+            return _make_response(sid, session, next_q + hint, can_escalate=False, context_gathering=True)
 
-        print(f"  [Triage] Candidates: {candidates} confident={result['confident']}")
+    except Exception as e:
+        print(f"  [Triage] Error: {e}")
 
-        if result["confident"]:
-            session["asset_confirmed"] = True
-            session["triage_active"]   = False
-            asset = result["matched"]
-            name  = asset.get("identifier") or "the asset"
-            env   = asset.get("environment") or ""
-            team  = asset.get("team") or ""
-            reply = (
-                f"Found it. This is {name}"
-                + (f" in the {env} environment" if env else "")
-                + (f", owned by {team}" if team else "")
-                + ". Go ahead and raise the ticket."
-            )
-            return ChatMessageResponse(
-                session_id        = sid,
-                reply             = reply,
-                intent            = "ready_to_escalate",
-                detected_domain   = session["domain"] or "other",
-                detected_severity = session["severity"] or "medium",
-                resolved          = False,
-                can_escalate      = True,
-                attempt_number    = session["solve_attempts"],
-                context_gathering = False,
-            )
-
-    # More questions?
-    if qi < len(questions):
-        next_q = questions[qi]
-        session["triage_q_index"] += 1
-        candidates = len([
-            r for r in rows
-            if all(v.lower() in str(r.get(c,"")).lower() for c,v in session["triage_filters"].items())
-        ]) if session["triage_filters"] else len(rows)
-
-        hint = f" ({candidates} possible matches)" if candidates > 1 else ""
-        return ChatMessageResponse(
-            session_id        = sid,
-            reply             = next_q + hint,
-            intent            = "context_gathering",
-            detected_domain   = session["domain"] or "other",
-            detected_severity = session["severity"] or "medium",
-            resolved          = False,
-            can_escalate      = False,
-            attempt_number    = session["solve_attempts"],
-            context_gathering = True,
-        )
-
-    # All questions done
     session["triage_active"] = False
-    asset = session.get("asset_match")
-    if asset:
-        name  = asset.get("identifier") or "the asset"
-        reply = f"Thanks. I found {name}. The ticket will be routed to the right team. Raise it now."
-    else:
-        reply = "Thanks for the details. I have enough to route this to the right team. Raise the ticket now."
+    reply = "Thanks for the details. Raising the ticket now and routing to the network engineering team."
+    return _make_response(sid, session, reply, can_escalate=True)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_response(
+    sid: str, session: dict, reply: str,
+    resolved: bool = False,
+    can_escalate: bool = False,
+    context_gathering: bool = False,
+) -> ChatMessageResponse:
     return ChatMessageResponse(
         session_id        = sid,
         reply             = reply,
-        intent            = "ready_to_escalate",
-        detected_domain   = session["domain"] or "other",
-        detected_severity = session["severity"] or "medium",
-        resolved          = False,
-        can_escalate      = True,
-        attempt_number    = session["solve_attempts"],
-        context_gathering = False,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# NETSKOPE CUSTOM TRIAGE
-# ─────────────────────────────────────────────────────────────────────────────
-
-NETSKOPE_TRIAGE_QUESTION = """Before I raise this ticket I need a few quick details to route it to exactly the right engineer.
-
-Please answer all of these:
-
-1. Which cloud provider or platform are you using to access this? (AWS / Azure / GCP / On-premise / Not sure)
-2. What is your Account ID, Tenant ID, or Organisation name?
-3. What is the name of the instance, server, or device you are trying to reach?
-4. What environment is this? (Production / Staging / Development)"""
-
-
-def _start_netskope_triage(session: dict, sid: str) -> ChatMessageResponse:
-    """Start Netskope custom triage — ask all 4 questions in one message."""
-    session["netskope_triage"]          = True
-    session["netskope_triage_answered"] = False
-
-    return ChatMessageResponse(
-        session_id        = sid,
-        reply             = NETSKOPE_TRIAGE_QUESTION,
-        intent            = "context_gathering",
-        detected_domain   = "networking",
-        detected_severity = session.get("severity") or "high",
-        resolved          = False,
-        can_escalate      = False,
-        attempt_number    = session.get("solve_attempts", 2),
-        context_gathering = True,
-    )
-
-
-def _handle_netskope_triage_answer(db: Session, session: dict, sid: str, answer: str) -> ChatMessageResponse:
-    """
-    Process the user's single reply to all 4 Netskope triage questions.
-    Builds professional summaries for both user and engineer.
-    """
-    session["netskope_triage_answered"] = True
-    session["netskope_triage"]          = False
-
-    # Collect context from conversation
-    msgs      = session.get("messages", [])
-    user_msgs = [m["content"] for m in msgs if m["role"] == "user"]
-    ai_msgs   = [m["content"] for m in msgs if m["role"] == "assistant"]
-
-    # Find original URL/app from first user message
-    original_url = next(
-        (m for m in user_msgs if any(kw in m.lower() for kw in ["http", ".com", "access", "application", "url"])),
-        user_msgs[0] if user_msgs else "the application"
-    )
-
-    # Extract resolved IP from DNS output
-    dns_msg  = next((m for m in user_msgs if any(kw in m for kw in ["IN A", "103.", "141.", "172.", "10.0", "10.1"])), "")
-    ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', dns_msg)
-    resolved_ip = ip_match.group(1) if ip_match else "a non-191.x.x.x address"
-
-    answer_clean = answer.strip()
-
-    # ── Engineer description — professional incident format ──────────────
-    diagnosis = (
-        f"Incident: Netskope Routing Issue — Application Access Blocked\n\n"
-        f"User is unable to access {original_url.strip()} from their {answer_clean}.\n\n"
-        f"DNS is resolving to {resolved_ip} instead of the expected 191.x.x.x Netskope "
-        f"range, confirming traffic is not routing through Netskope.\n\n"
-        f"Reconnecting Netskope and flushing DNS cache did not resolve the issue.\n"
-        f"Engineer intervention required to investigate Netskope gateway configuration."
-    )
-
-    # ── User-facing summary — warm and clear ────────────────────────────
-    user_summary = (
-        f"We've gone through your issue — {original_url.strip()} is not accessible "
-        f"because traffic is not routing through Netskope correctly. "
-        f"We tried reconnecting Netskope and flushing DNS but the issue persists.\n\n"
-        f"This has been raised to our Netskope team and will be resolved shortly."
-    )
-
-    session["asset_context"]["diagnosis"]    = diagnosis
-    session["asset_context"]["user_details"] = answer_clean
-    session["asset_context"]["user_summary"] = user_summary
-
-    session["asset_match"] = {
-        "table_name":    "netskope_custom",
-        "display_name":  "Netskope Assets",
-        "contact_email": "eng.netskope1@nexusdesk.com",
-        "manager_email": "mgr.netskope@nexusdesk.com",
-        "identifier":    "Netskope Gateway",
-        "environment":   "Production",
-        "team":          "Netskope & Cloud Security",
-        "row":           {"diagnosis": diagnosis},
-    }
-    session["asset_confirmed"] = True
-
-    return ChatMessageResponse(
-        session_id        = sid,
-        reply             = user_summary,
-        intent            = "ready_to_escalate",
-        detected_domain   = "networking",
-        detected_severity = session.get("severity") or "high",
-        resolved          = False,
-        can_escalate      = True,
-        attempt_number    = session.get("solve_attempts", 2),
-        context_gathering = False,
+        intent            = "solve",
+        detected_domain   = session.get("domain") or "networking",
+        detected_severity = session.get("severity") or "medium",
+        resolved          = resolved,
+        can_escalate      = can_escalate,
+        attempt_number    = session.get("solve_attempts", 0),
+        context_gathering = context_gathering,
     )
 
 
@@ -483,204 +798,130 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
     sid     = data.session_id or str(uuid.uuid4())
     session = _get_session(sid)
 
+    msg = data.message.strip()
+
     # Store problem on first message
-    if not session["problem"] and data.message:
-        session["problem"] = data.message[:400]
+    if not session["problem"] and msg:
+        session["problem"] = msg[:400]
 
-    # Netskope custom triage — single Q&A round
-    if session.get("netskope_triage"):
-        return _handle_netskope_triage_answer(db, session, sid, data.message)
-
-    # Normal asset triage Q&A
+    # Triage active — handle answer
     if session["triage_active"]:
-        return _handle_triage_answer(db, session, sid, data.message)
+        session["messages"].append({"role": "user", "content": msg})
+        return _handle_triage_answer(db, session, sid, msg)
 
-    # User asking to escalate — noted but we still complete the solve phase
-    user_escalate = any(p in data.message.lower() for p in [
-        "please escalate", "escalate this", "escalate now", "just escalate",
-        "raise a ticket", "send an engineer", "need an engineer",
-        "cant fix", "nothing works", "please just send",
-    ])
-    if user_escalate:
-        session["user_wants_escalate"] = True
+    # Triage started but not yet active — start triage on next message
+    if session.get("flow_step") == "triage" and not session.get("triage_active") and session.get("triage_started"):
+        session["messages"].append({"role": "user", "content": msg})
+        return _start_triage_db(db, session, sid)
 
     # Append user message
-    session["messages"].append({"role": "user", "content": data.message})
+    session["messages"].append({"role": "user", "content": msg})
 
-    # Resolved check
-    if any(p in data.message.lower() for p in ["fixed","works now","that worked","sorted","solved","all good"]):
-        session["messages"].append({"role": "assistant", "content": "Glad that sorted it out."})
-        return ChatMessageResponse(
-            session_id        = sid,
-            reply             = "Glad that sorted it out. Feel free to reach out if anything else comes up.",
-            intent            = "solve",
-            detected_domain   = session["domain"] or "other",
-            detected_severity = session["severity"] or "medium",
-            resolved          = True,
-            can_escalate      = False,
-            attempt_number    = session["solve_attempts"],
-            context_gathering = False,
-        )
+    step = session["flow_step"]
+    print(f"  [Chat] Flow step={step}")
 
-    # Phase hint for Claude
-    user_wants_escalate = session.get("user_wants_escalate", False)
+    # ── FLOW ROUTING ──────────────────────────────────────────────────────────
 
-    # Detect if this is a URL/Netskope scenario — skip intake, go straight to protocol
-    # URL/reachability scenario detection
-    # Triggers when user says an app/URL/site is unreachable, not loading, not responding
-    url_keywords = [
-        "can't access", "cannot access", "cant access",
-        "not accessible", "not reachable", "unreachable",
-        "not loading", "won't load", "wont load", "page not loading",
-        "not responding", "not opening",
-        "unable to access", "unable to open",
-        "site not found", "page not found",
-        "website not", "webpage not",
-        "application not loading", "app not loading",
-        "http://", "https://", ".com", ".internal", ".corp",
-        "netskope", "nslookup", "191.x.x.x",
-        "err_name_not_resolved", "dns_probe", "err_connection",
-    ]
-    all_msgs_lower = " ".join(m["content"].lower() for m in session["messages"])
-    is_url_scenario = any(kw in all_msgs_lower for kw in url_keywords)
+    # Step 1: Ask if broken (first message)
+    if step == "broken":
+        session["problem"] = msg[:400]
+        return _handle_broken(session, sid, msg)
 
-    if session["phase"] == "intake":
-        if is_url_scenario:
-            # Detect if user already answered the Netskope question
-            netskope_answer = ""
-            for m in session["messages"]:
-                c = m["content"].lower().strip()
-                if c in ("yes", "a", "a)", "yes, i am", "yes i am", "yeah"):
-                    netskope_answer = "YES"
-                elif c in ("no", "b", "b)", "no i am not", "nope"):
-                    netskope_answer = "NO"
-                elif c in ("not sure", "maybe", "c", "c)", "not sure / maybe", "unsure"):
-                    netskope_answer = "MAYBE"
-            if netskope_answer:
-                session["netskope_answer"] = netskope_answer
-            ns = session.get("netskope_answer", "")
-            if ns == "NO":
-                hint = "URL/APPLICATION ACCESS PROTOCOL — USER SAID NO TO NETSKOPE. This user is NOT using Netskope. Do NOT mention Netskope reconnection. Focus on DNS routing issue on their network. If DNS resolves to non-191.x.x.x range, say it is a DNS issue (not Netskope issue). Fixes: flush DNS cache, try mobile hotspot. End with [READY_TO_SOLVE] after 2 attempts."
-            elif ns in ("YES", "MAYBE"):
-                hint = "URL/APPLICATION ACCESS PROTOCOL — USER IS USING NETSKOPE (or maybe). If DNS resolves to non-191.x.x.x range, say it is a Netskope routing issue. Fixes: disconnect/reconnect Netskope, flush DNS. End with [READY_TO_SOLVE] after 2 attempts."
-            else:
-                hint = "URL/APPLICATION ACCESS PROTOCOL: Follow the special Netskope protocol. First ask: Are you trying to access this through Netskope? A) Yes B) No C) Not sure / Maybe. Then get OS, run DNS check, analyze IP."
-        elif user_wants_escalate:
-            hint = "PHASE 1 INTAKE: The user is urgently requesting escalation. You have enough context now. Acknowledge their urgency briefly, then end your reply with [READY_TO_SOLVE] immediately — do not ask more questions."
-        else:
-            hint = "PHASE 1 INTAKE: Ask questions to understand the problem. Do NOT give solutions yet. When you have enough context, end with [READY_TO_SOLVE]."
-    elif session["phase"] == "solve":
-        session["solve_attempts"] += 1
-        n = session["solve_attempts"]
-        ns = session.get("netskope_answer", "")
-        if is_url_scenario and n >= 2:
-            hint = f"URL/NETSKOPE PROTOCOL: You have done {n} fix attempts. End this reply with [READY_TO_SOLVE] — the system will now route to triage and then raise the ticket."
-        elif is_url_scenario and ns == "NO":
-            # Check if IP was 191.x.x.x (correct) or wrong IP
-            msgs_text = " ".join(m["content"].lower() for m in session["messages"])
-            if "191." in msgs_text:
-                hint = f"URL PROTOCOL — NO NETSKOPE, DNS CORRECT (191.x.x.x): Fix attempt {n} of 2. DNS is fine. Give browser/app troubleshooting: incognito mode, clear cache, check VPN, try mobile hotspot."
-            else:
-                hint = f"URL/NETSKOPE PROTOCOL — USER SAID NO TO NETSKOPE: Fix attempt {n} of 2. Do NOT mention Netskope. DNS routing issue. Fixes: flush DNS cache or try mobile hotspot."
-        elif is_url_scenario:
-            hint = f"URL/NETSKOPE PROTOCOL: Fix attempt {n} of 2. Give one specific fix. If Netskope routing issue: disconnect/reconnect Netskope. If DNS correct: try browser fix."
-        elif user_wants_escalate and n < 3:
-            hint = f"PHASE 2 SOLVE: The user wants to escalate but try attempt {n} of 3 first. Acknowledge urgency briefly then give one specific targeted fix. There are {3 - n} attempts remaining after this."
-        elif n >= 3:
-            hint = f"PHASE 2 SOLVE: Final attempt 3 of 3. Give your best remaining solution. After this the system will automatically escalate to an engineer."
-        else:
-            hint = f"PHASE 2 SOLVE: Attempt {n} of 3. Give one specific targeted solution. Do not suggest escalation."
-    else:
-        hint = ""
+    # Step 2: Waiting for broken answer
+    elif step == "waiting_broken":
+        return _handle_broken(session, sid, msg)
 
-    try:
-        reply, domain, severity, signals = _call_claude(session, hint)
+    # Step 3: Waiting for customer impacting answer
+    elif step == "waiting_impacting":
+        return _handle_impacting(session, sid, msg)
 
-        session["domain"]   = domain
-        session["severity"] = severity
-        session["messages"].append({"role": "assistant", "content": reply})
+    # Step 4: Waiting for multi-customer answer
+    elif step == "waiting_multi_customer":
+        return _handle_multi_customer(session, sid, msg)
 
-        # Phase transitions
-        print(f"  [Chat] Phase={session['phase']} attempts={session['solve_attempts']} signals={signals}")
-        if "READY_TO_SOLVE" in signals and session["phase"] == "intake":
-            session["phase"] = "solve"
-            print(f"  [Chat] Phase: intake → solve")
-        # Force transition to solve after 3 intake messages even without signal
-        elif session["phase"] == "intake" and len([m for m in session["messages"] if m["role"] == "user"]) >= 3:
-            session["phase"] = "solve"
-            print(f"  [Chat] Phase: intake → solve (forced after 3 user messages)")
+    # Step 5: Consult flow
+    elif step == "waiting_consult":
+        return _handle_consult(session, sid, msg)
 
-        # After exactly 3 solve attempts → start triage (only once)
-        max_attempts = 2 if is_url_scenario else 3
-        if session["phase"] == "solve" and session["solve_attempts"] >= max_attempts and not session.get("triage_started"):
-            session["phase"]          = "triage"
+    elif step == "waiting_details":
+        return _handle_details(session, sid, msg)
+
+    elif step == "waiting_deadline":
+        return _handle_deadline(session, sid, msg)
+
+    elif step == "waiting_help_today":
+        return _handle_help_today(session, sid, msg)
+
+    # Waiting for problem description — immediately search runbook and start AI
+    elif step == "waiting_problem":
+        session["problem"] = msg[:400]
+        session["flow_step"] = "ai_analysis"
+        session["flow_origin"] = "broken"
+        # Get RAG context immediately based on problem description
+        rag_context = _get_rag(msg)
+        session["rag_context"] = rag_context
+        return _start_ai_analysis(session, sid)
+
+    # Mid-check — user decides continue or escalate
+    elif step == "mid_check":
+        msg_lower = msg.lower()
+        if any(w in msg_lower for w in ["ticket", "escalate", "raise", "engineer", "no", "nope", "just raise"]):
+            session["flow_step"]      = "triage"
             session["triage_started"] = True
-            # For URL/Netskope scenarios force networking domain for better triage
-            all_text = " ".join(m["content"].lower() for m in session["messages"]) + " " + reply.lower()
-            netskope_keywords = ["netskope", "nslookup", "host ", "resolving to", "191.",
-                                  "routing issue", "dns resolution", "103.", "141."]
-            if any(kw in all_text for kw in netskope_keywords):
-                session["domain"] = "networking"
-                print(f"  [Chat] URL/Netskope scenario — domain set to networking for triage")
-            print(f"  [Chat] Phase: solve → triage after 3 attempts")
+            return _start_triage_db(db, session, sid)
+        else:
+            # Continue troubleshooting
+            session["flow_step"] = "ai_analysis"
+            return _continue_ai_analysis(session, sid, msg)
 
-            print(f"  [Chat] Triage trigger: is_url_scenario={is_url_scenario} netskope={session.get('netskope_answer')}")
-            # For Netskope/URL scenarios — use custom single-question triage
-            if is_url_scenario:
-                netskope_triage_response = _start_netskope_triage(session, sid)
-                combined_reply = reply + "" + netskope_triage_response.reply
-                return ChatMessageResponse(
-                    session_id        = sid,
-                    reply             = combined_reply,
-                    intent            = "context_gathering",
-                    detected_domain   = "networking",
-                    detected_severity = severity,
-                    resolved          = False,
-                    can_escalate      = False,
-                    attempt_number    = session["solve_attempts"],
-                    context_gathering = True,
-                )
+    # AI Analysis
+    elif step == "ai_analysis":
+        return _continue_ai_analysis(session, sid, msg)
 
-            # Normal scenarios — use asset DB triage
-            triage_response = _start_triage(db, session, sid)
-            combined_reply  = reply + "" + triage_response.reply
-            return ChatMessageResponse(
-                session_id        = sid,
-                reply             = combined_reply,
-                intent            = "context_gathering",
-                detected_domain   = domain,
-                detected_severity = severity,
-                resolved          = False,
-                can_escalate      = False,
-                attempt_number    = session["solve_attempts"],
-                context_gathering = True,
+    # Combined sprint/release question
+    elif step == "waiting_next_sprint":
+        # Use Claude to detect timeline from user answer
+        try:
+            from app.core.config import settings as _s
+            import anthropic as _a
+            _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
+            resp = _cl.messages.create(
+                model      = "claude-sonnet-4-5",
+                max_tokens = 30,
+                messages   = [{"role": "user", "content": (
+                    f"Extract the timeline from this message. Reply with one of: "
+                    f"NEXT_SPRINT_AND_RELEASE, NEXT_SPRINT_ONLY, NEXT_RELEASE_ONLY, SPECIFIC_DATE, NO_RUSH\n"
+                    f"Message: {msg}"
+                )}],
             )
+            timeline_code = resp.content[0].text.strip().upper()
+        except Exception:
+            timeline_code = "NEXT_SPRINT_ONLY" if "sprint" in msg.lower() else "NO_RUSH"
 
-        return ChatMessageResponse(
-            session_id        = sid,
-            reply             = reply,
-            intent            = "solve",
-            detected_domain   = domain,
-            detected_severity = severity,
-            resolved          = False,
-            can_escalate      = False,
-            attempt_number    = session["solve_attempts"],
-            context_gathering = False,
-        )
+        timeline_map = {
+            "NEXT_SPRINT_AND_RELEASE": "next sprint and next release",
+            "NEXT_SPRINT_ONLY":        "next sprint",
+            "NEXT_RELEASE_ONLY":       "next release",
+            "SPECIFIC_DATE":           msg.strip(),
+            "NO_RUSH":                 "no fixed timeline",
+        }
+        session["planning_timeline"] = timeline_map.get(timeline_code, "next sprint")
+        session["flow_step"]         = "ai_analysis"
+        session["flow_origin"]       = "planning"
+        session["solve_attempts"]    = 0
+        return _start_ai_analysis(session, sid)
 
-    except Exception as e:
-        print(f"  [Chat] Claude error: {e}")
-        return ChatMessageResponse(
-            session_id        = sid,
-            reply             = "Something went wrong. Please try again in a moment.",
-            intent            = "solve",
-            detected_domain   = session["domain"] or "other",
-            detected_severity = session["severity"] or "medium",
-            resolved          = False,
-            can_escalate      = False,
-            attempt_number    = session["solve_attempts"],
-            context_gathering = False,
-        )
+    # Major incident, next sprint, consult complete — done
+    elif step in ("major_incident", "next_sprint", "consult_complete"):
+        reply = "Is there anything else I can help with?"
+        session["messages"].append({"role": "assistant", "content": reply})
+        return _make_response(sid, session, reply)
+
+    # Default — start flow
+    else:
+        session["flow_step"] = "broken"
+        session["problem"]   = msg[:400]
+        return _handle_broken(session, sid, msg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -773,37 +1014,29 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
     asset    = session.get("asset_match")
     context  = session.get("asset_context", {})
 
-    priority_map = {"critical":TicketPriority.CRITICAL,"high":TicketPriority.HIGH,
-                    "medium":TicketPriority.MEDIUM,"low":TicketPriority.LOW}
-    sla_map      = {"critical":30,"high":120,"medium":480,"low":1440}
+    priority_map = {"critical": TicketPriority.CRITICAL, "high": TicketPriority.HIGH,
+                    "medium": TicketPriority.MEDIUM, "low": TicketPriority.LOW}
+    sla_map      = {"critical": 30, "high": 120, "medium": 480, "low": 1440}
 
-    # Build diagnosis
-    msgs      = session.get("messages", [])
-    ai_msgs   = [m["content"] for m in msgs if m["role"] == "assistant"]
+    msgs    = session.get("messages", [])
+    ai_msgs = [m["content"] for m in msgs if m["role"] == "assistant"]
 
-    # For Netskope scenarios use the pre-built full diagnosis
-    if session.get("asset_context", {}).get("diagnosis"):
-        diagnosis = session["asset_context"]["diagnosis"]
+    if context.get("diagnosis"):
+        diagnosis = context["diagnosis"]
     else:
         diagnosis = ai_msgs[-1][:500] if ai_msgs else ""
-
         if asset:
             diagnosis += (
-                f"\n\nAsset Identified:"
-                f"\n  Asset:       {asset.get('identifier') or 'N/A'}"
-                f"\n  Environment: {asset.get('environment') or 'N/A'}"
-                f"\n  Team:        {asset.get('team') or 'N/A'}"
-                f"\n  Contact:     {asset.get('contact_email') or 'N/A'}"
-                f"\n  Manager:     {asset.get('manager_email') or 'N/A'}"
+                f"\n\nAsset: {asset.get('identifier') or 'N/A'}"
+                f"\nEnvironment: {asset.get('environment') or 'N/A'}"
+                f"\nTeam: {asset.get('team') or 'N/A'}"
             )
-
         if context:
             qs = session.get("triage_questions", [])
             an = session.get("triage_answers", [])
             diagnosis += "\n\nUser answers:\n" + "\n".join(f"  {q} → {a}" for q, a in zip(qs, an))
 
-    # Routing
-    domain_str  = str(data.domain).lower().replace("ticketdomain.", "") if data.domain else "other"
+    domain_str  = "networking"  # always networking
     engineer_id = None
     team_id     = None
 
@@ -813,7 +1046,6 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
     print(f"  [Route] asset_match={asset}")
     print(f"  [Route] contact_email={contact_email} manager_email={manager_email}")
 
-    # P1 — asset owner or manager → team + best available engineer
     if contact_email:
         u = db.query(User).filter(User.email == contact_email).first()
         if u:
@@ -822,68 +1054,57 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
                 engineer_id = u.id
                 print(f"  [Route] Asset owner: {contact_email}")
             else:
-                # It's a manager — find their team and best available engineer
                 t = db.query(Team).filter(Team.manager_id == u.id).first()
                 if t:
                     team_id = t.id
-                    print(f"  [Route] Manager → team: {contact_email} ({t.name})")
-                    # Also find best available engineer from this team
-                    from app.models.team import TeamMember
+                    print(f"  [Route] Manager → team: {contact_email}")
                     members = db.query(TeamMember).filter(TeamMember.team_id == t.id).all()
-                    best_eng_id = None
-                    best_score  = -999
+                    best_eng_id, best_score = None, -999
                     for m in members:
-                        eu  = db.query(User).filter(User.id == m.user_id).first()
-                        eo  = db.query(Engineer).filter(Engineer.user_id == m.user_id).first()
-                        if not eu or not eo or not eo.is_activated:
-                            continue
-                        if str(eo.availability_status) not in ("available", "AvailabilityStatus.AVAILABLE"):
-                            continue
+                        eu = db.query(User).filter(User.id == m.user_id).first()
+                        eo = db.query(Engineer).filter(Engineer.user_id == m.user_id).first()
+                        if not eu or not eo or not eo.is_activated: continue
+                        if str(eo.availability_status) not in ("available", "AvailabilityStatus.AVAILABLE"): continue
                         score = -eo.active_ticket_count
                         if score > best_score:
                             best_score  = score
                             best_eng_id = eu.id
                     if best_eng_id:
                         engineer_id = best_eng_id
-                        team_id     = None  # assign to engineer directly
-                        print(f"  [Route] Best team engineer found: {best_eng_id}")
+                        team_id     = None
 
-    # P2 — manager's team
     if not engineer_id and manager_email:
         u = db.query(User).filter(User.email == manager_email).first()
         if u:
             t = db.query(Team).filter(Team.manager_id == u.id).first()
             if t:
                 team_id = t.id
-                print(f"  [Route] Manager team: {manager_email}")
 
-    # P3 — domain team
     if not engineer_id and not team_id:
         team_id = _find_best_team(db, domain_str, user.timezone or "UTC")
         if team_id: print(f"  [Route] Domain team fallback")
 
-    # P4 — individual engineer
     if not engineer_id and not team_id:
         engineer_id = _find_best_engineer(db, domain_str, user.timezone or "UTC")
         if engineer_id: print(f"  [Route] Engineer fallback")
 
     ticket = Ticket(
-        ticket_number    = _generate_ticket_number(db),
-        user_id          = user.id,
-        engineer_id      = engineer_id,
-        team_id          = team_id,
-        title            = data.title,
-        description      = data.description,
-        domain           = TicketDomain(domain_str) if domain_str in [d.value for d in TicketDomain] else TicketDomain.OTHER,
-        priority         = priority_map.get(severity, TicketPriority.MEDIUM),
-        status           = TicketStatus.OPEN,
-        steps_tried      = data.steps_tried,
-        ai_diagnosis     = diagnosis.strip() or None,
-        ai_attempted     = True,
-        user_city        = user.city,
-        user_country     = user.country,
-        user_timezone    = user.timezone,
-        sla_deadline     = datetime.utcnow() + timedelta(minutes=sla_map.get(severity, 480)),
+        ticket_number = _generate_ticket_number(db),
+        user_id       = user.id,
+        engineer_id   = engineer_id,
+        team_id       = team_id,
+        title         = data.title,
+        description   = data.description,
+        domain        = TicketDomain.NETWORKING,
+        priority      = priority_map.get(severity, TicketPriority.MEDIUM),
+        status        = TicketStatus.OPEN,
+        steps_tried   = data.steps_tried,
+        ai_diagnosis  = diagnosis.strip() or None,
+        ai_attempted  = True,
+        user_city     = user.city,
+        user_country  = user.country,
+        user_timezone = user.timezone,
+        sla_deadline  = datetime.utcnow() + timedelta(minutes=sla_map.get(severity, 480)),
     )
     db.add(ticket)
 
@@ -896,12 +1117,11 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
 
     db.commit()
     db.refresh(ticket)
-    print(f"  [Ticket] {ticket.ticket_number} | {domain_str} | team={team_id} | eng={engineer_id}")
+    print(f"  [Ticket] {ticket.ticket_number} | networking | team={team_id} | eng={engineer_id}")
 
     if data.session_id in _sessions:
         del _sessions[data.session_id]
 
-    # Build response with routing info
     eng_name = eng_email = eng_city = eng_tz = eng_id_str = None
     t_name   = t_id_str = None
     r_type   = r_reason = None
@@ -984,13 +1204,11 @@ def _ticket_resp(db: Session, ticket: Ticket) -> UserTicketResponse:
         if team:
             team_name   = team.name
             team_id_str = team.team_id
-            # Get manager email
             if team.manager_id:
                 mgr = db.query(User).filter(User.id == team.manager_id).first()
                 if mgr:
                     team_manager_email = mgr.email
     elif ticket.engineer_id:
-        # Find team through TeamMember
         member = db.query(TeamMember).filter(TeamMember.user_id == ticket.engineer_id).first()
         if member:
             team = db.query(Team).filter(Team.id == member.team_id).first()

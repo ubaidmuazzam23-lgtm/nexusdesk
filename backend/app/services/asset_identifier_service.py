@@ -2,16 +2,13 @@
 #
 # PURPOSE:
 #   Given a user problem + domain, fetch relevant assets from ALL dynamic tables,
-#   then ask Claude to generate the minimum questions needed to pinpoint ONE asset.
+#   then ask Claude to generate USER-FRIENDLY questions to pinpoint ONE asset.
 #
-#   Questions are based on REAL column values from the actual asset rows:
-#     "Which database? (Oracle / MySQL / PostgreSQL)"
-#     "Which server? (jenkins-prod-01 / jenkins-prod-02)"
-#     "Which region? (ap-south-1 / asia-southeast1)"
+#   Questions must be answerable by a REGULAR USER — not a technical person.
+#   Ask about: location, environment, scope, impact — NOT hostnames or IPs.
 #
 #   After each answer, search all tables for a matching row.
 #   If exactly 1 row found → confident match → route to owner.
-#   If 0 rows found → relax filters → best-effort match → domain fallback.
 
 import json
 import re
@@ -25,39 +22,48 @@ from app.core.config import settings
 _client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 — FETCH CANDIDATE ASSETS FROM DB
+# DOMAIN KEYWORDS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Domain → keywords to search in asset data
 DOMAIN_KEYWORDS = {
     "networking":          ["router", "switch", "firewall", "vpn", "network", "dns", "proxy", "load balancer"],
     "security":            ["firewall", "waf", "ids", "siem", "dlp", "nessus", "security"],
     "database":            ["oracle", "mysql", "postgres", "mongodb", "redis", "cassandra", "elasticsearch", "database", "db"],
-    "devops":              ["jenkins", "gitlab", "kubernetes", "k8s", "nexus", "sonar", "ci", "pipeline", "deployment", "deploy"],
-    "software":            ["app", "api", "microservice", "portal", "gateway", "payment", "service", "checkout", "ecommerce", "web"],
-    "cloud":               ["ec2", "gcp", "azure", "s3", "cloud", "vm", "instance", "bucket", "payment", "ecommerce", "portal", "api", "web", "sap", "batch"],
+    "devops":              ["jenkins", "gitlab", "kubernetes", "k8s", "nexus", "sonar", "ci", "pipeline", "deployment"],
+    "software":            ["app", "api", "microservice", "portal", "gateway", "payment", "service", "checkout"],
+    "cloud":               ["ec2", "gcp", "azure", "s3", "cloud", "vm", "instance", "bucket"],
     "infrastructure":      ["hypervisor", "vcenter", "esxi", "backup", "storage", "monitoring"],
     "hardware":            ["blade", "server", "workstation", "printer"],
     "email_communication": ["exchange", "smtp", "mail", "teams", "slack", "email"],
     "erp_business_apps":   ["sap", "oracle ebs", "salesforce", "servicenow", "erp", "crm"],
-    "identity_access":     ["ldap", "active directory", "sso", "pam", "radius", "login", "auth", "password", "access"],
-    "endpoint_management": ["mdm", "antivirus", "patch", "endpoint", "laptop", "desktop", "device"],
-    # Generic fallback keywords — used when domain is "other"
-    "other":               ["payment", "checkout", "purchase", "order", "invoice", "service", "system", "application"],
+    "identity_access":     ["ldap", "active directory", "sso", "pam", "radius", "login", "auth"],
+    "endpoint_management": ["mdm", "antivirus", "patch", "endpoint", "laptop", "desktop"],
+    "other":               ["payment", "checkout", "purchase", "order", "invoice", "service"],
 }
 
-# Columns whose values make good question options (not emails, not IPs)
-GOOD_QUESTION_ROLES = {"identifier", "environment", "region", "application", "team", "os", "power_state", "other"}
-SKIP_ROLES          = {"contact_email", "manager_email", "director_email", "ops_email", "ip"}
+SKIP_ROLES = {"contact_email", "manager_email", "director_email", "ops_email", "ip"}
+
+# Columns that a regular user would NOT know
+TECHNICAL_COLUMNS = {
+    "hostname", "device_id", "asset_tag", "mac_address", "private_ip", "public_ip",
+    "vlan_id", "rack_unit", "firmware_version", "port_count", "throughput_gbps",
+    "purchase_date", "warranty_expiry", "uptime_days", "subnet", "model",
+    "primary_owner_email", "it_manager_email", "it_director_email", "infra_ops_email",
+}
+
+# Columns a regular user CAN answer about
+USER_FRIENDLY_COLUMNS = {
+    "data_centre", "environment", "device_type", "manufacturer",
+    "business_unit", "team_name", "power_status", "criticality",
+    "sla_tier", "protocol",
+}
 
 
-def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tuple[list, list]:
-    """
-    Fetch candidate asset rows from ALL dynamic tables.
-    Returns: (rows_list, tables_meta_list)
-      rows_list: list of dicts, each row has all column values + _table_name
-      tables_meta: list of {table_name, display_name, columns_meta}
-    """
+# ─────────────────────────────────────────────────────────────────────────────
+# FETCH ASSETS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tuple:
     from app.services.dynamic_table_service import get_all_tables
     from app.core.database import SessionLocal
 
@@ -67,9 +73,7 @@ def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tup
         all_rows = []
         meta     = []
 
-        # Build keyword list from domain + problem words
         domain_kws  = DOMAIN_KEYWORDS.get(domain, [])
-        # Also add keywords from adjacent domains when domain is generic
         if domain in ("other", "software", "cloud"):
             domain_kws += DOMAIN_KEYWORDS.get("cloud", []) + DOMAIN_KEYWORDS.get("software", [])
         problem_kws = [w.lower() for w in re.split(r'\W+', problem) if len(w) > 3]
@@ -81,12 +85,6 @@ def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tup
             if not all_cols:
                 continue
 
-            # Text columns to search keywords in
-            search_cols = [c for c in all_cols
-                           if cols_meta[c].get("role") not in ("contact_email","manager_email",
-                                                                "director_email","ops_email")][:8]
-
-            # Always fetch ALL rows from every table then score by relevance
             try:
                 unique_rows = fresh_db.execute(
                     text(f'SELECT * FROM "{tbl.table_name}" LIMIT {limit}')
@@ -96,7 +94,6 @@ def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tup
                 except Exception: pass
                 continue
 
-            # Score rows by keyword relevance — most relevant float to top
             if keywords and unique_rows:
                 scored = []
                 for row in unique_rows:
@@ -106,7 +103,6 @@ def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tup
                 scored.sort(key=lambda x: x[0], reverse=True)
                 unique_rows = [r for _, r in scored]
 
-            # Get ACTUAL column order from DB — never assume order
             try:
                 probe = fresh_db.execute(
                     text(f'SELECT * FROM "{tbl.table_name}" LIMIT 1')
@@ -128,7 +124,6 @@ def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tup
                 "columns_meta": cols_meta,
             })
 
-        # Sort all rows across ALL tables by keyword score, best first
         if keywords:
             def row_score(r):
                 row_str = " ".join(str(v).lower() for v in r.values() if v and not str(v).startswith("_"))
@@ -142,14 +137,10 @@ def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tup
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 — BUILD ASSET SUMMARY FOR PROMPT
+# BUILD ASSET SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_asset_summary(rows: list) -> str:
-    """
-    Build a compact asset list for the Claude prompt.
-    Each row shows only the values that are useful for identification.
-    """
     if not rows:
         return "No specific assets found."
 
@@ -171,57 +162,49 @@ def build_asset_summary(rows: list) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — GENERATE QUESTIONS
+# GENERATE USER-FRIENDLY QUESTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
-QUESTION_PROMPT = """You are an IT support triage assistant. A user reported an IT issue and needs it routed to the right engineer.
+QUESTION_PROMPT = """You are an IT support triage assistant helping route a ticket to the right engineer.
 
 User problem: "{problem}"
 
-Here are the actual assets in the system that could be affected:
+Assets that could be affected:
 {asset_list}
 
-Your task: Generate 2-4 questions that will identify EXACTLY which asset is affected.
+Generate 1-2 questions to identify exactly which asset is affected.
 
 RULES:
-1. Look at the asset list above. Find columns that DIFFERENTIATE between the assets.
-   Ask about the column that eliminates the MOST candidates first.
-   Example: if all assets are in Singapore but different environments, ask about environment.
-   Example: if 3 are Oracle and 1 is MySQL, ask "Which database: Oracle or MySQL?"
+1. Questions must be answerable by a NON-TECHNICAL employee (finance, HR, regular office worker).
+   They know: their city, their office location, whether something is live or test.
+   They do NOT know: server names, IP addresses, hostnames, VLANs, rack units, model numbers.
 
-2. Use the ACTUAL VALUES from the asset list as the answer options.
-   Example: if server_name values are jenkins-prod-01, jenkins-prod-02, jenkins-stg-01 — use those exact names.
-   Example: if db_engine values are Oracle, MySQL, PostgreSQL — use those exact names.
+2. Look at EVERY column in the asset list. For each column decide:
+   - Would a regular employee know this? → ask about it in plain English
+   - Is it too technical? → skip it entirely
 
-3. Phrase questions in plain English that any employee understands:
-   GOOD: "Which database are you using? (Oracle / MySQL / PostgreSQL)"
-   GOOD: "Which server is affected? (jenkins-prod-01 / jenkins-prod-02)"  
-   GOOD: "Which region? (ap-south-1 / asia-southeast1 / uksouth)"
-   BAD:  "Which team vertical?" — employee doesn't know this
-   BAD:  "Which environment?" — too vague, say production/staging/development
-   BAD:  "Which business unit?" — too internal
+3. Convert technical values to plain English:
+   - data_centre "DC-Mumbai-01" → ask "Which city? (Mumbai / London / Singapore)"
+   - environment "Production" → ask "Is this your live system or a test system?"
+   - region "ap-south-1" → ask "Which region? (Asia / Europe / Americas)"
+   - team_name "Network Operations" → ask "Which team uses this? (Network / Cloud / Security)"
+   - Any code-like value → convert to plain English or skip
 
-4. If a column has only 1 distinct value across all assets — skip it, it won't help narrow down.
+4. Never ask about: device type (AI knows from problem), hostname, IP, MAC, VLAN, asset tag,
+   rack unit, firmware version, model number, purchase date, warranty.
 
-5. Ask the most discriminating question first (eliminates most candidates).
+5. Maximum 2 questions. Use the actual distinct values from the asset list as options.
 
-6. Never ask about email addresses, IP addresses, MAC addresses, VLAN IDs, or internal team codes.
-
-Respond ONLY with a valid JSON array of question strings. No explanation outside JSON."""
+Respond ONLY with a JSON array of strings. No explanation."""
 
 
 def generate_questions(db: Session, domain: str, problem: str) -> List[str]:
-    """
-    Fetch real assets → build prompt → ask Claude for targeted questions.
-    Single API call, low latency.
-    """
     rows, meta = fetch_assets(db, domain, problem)
 
     if not rows:
-        # Fallback — no assets found
         return [
-            "Which system or application is affected?",
-            "Is this a production or test system?",
+            "Which office or location are you in?",
+            "Is this a Production or Staging system?",
         ]
 
     asset_list = build_asset_summary(rows)
@@ -248,27 +231,26 @@ def generate_questions(db: Session, domain: str, problem: str) -> List[str]:
             print(f"\n  [AssetID] {len(questions)} questions generated for domain={domain}")
             for i, q in enumerate(questions, 1):
                 print(f"    Q{i}: {q}")
-            return questions[:4]
+            return questions[:3]
 
     except Exception as e:
         print(f"  [AssetID] Question generation error: {e}")
 
-    # Fallback — build from column samples directly
     return _fallback_questions(rows)
 
 
 def _fallback_questions(rows: list) -> List[str]:
-    """Build basic questions from actual column values without Claude."""
     if not rows:
-        return ["Which system is affected?", "Which environment?"]
+        return ["Which office or location are you in?", "Is this Production or Staging?"]
 
-    # Find columns with 2-8 distinct values
     col_values: Dict[str, set] = {}
     cols_meta  = rows[0].get("_columns_meta", {})
 
     for row in rows:
         for col, val in row.items():
             if col.startswith("_") or not val:
+                continue
+            if col.lower() in TECHNICAL_COLUMNS:
                 continue
             role = cols_meta.get(col, {}).get("role", "other")
             if role in SKIP_ROLES:
@@ -277,47 +259,45 @@ def _fallback_questions(rows: list) -> List[str]:
                 col_values[col] = set()
             col_values[col].add(str(val))
 
-    # Sort by distinct count (most discriminating first)
-    useful = [(col, vals) for col, vals in col_values.items() if 2 <= len(vals) <= 10]
+    useful = [(col, vals) for col, vals in col_values.items() if 2 <= len(vals) <= 8]
     useful.sort(key=lambda x: len(x[1]))
 
     questions = []
-    for col, vals in useful[:3]:
-        label   = col.replace("_", " ").title()
-        options = " / ".join(sorted(vals)[:6])
-        questions.append(f"Which {label}? ({options})")
+    for col, vals in useful[:2]:
+        if col == "data_centre":
+            cities = []
+            for v in sorted(vals)[:5]:
+                city = v.replace("DC-", "").split("-")[0]
+                cities.append(city)
+            questions.append(f"Which city are you based in? ({' / '.join(cities)})")
+        elif col == "environment":
+            questions.append("Is this affecting your live/production systems or a test environment?")
+        elif col == "device_type":
+            pass  # Never ask device type — AI knows from problem
+        else:
+            label   = col.replace("_", " ").title()
+            options = " / ".join(sorted(vals)[:5])
+            questions.append(f"Which {label}? ({options})")
 
-    return questions if questions else ["Which system is affected?", "Which environment?"]
+    questions = [q for q in questions if q]  # remove empty
+    return questions if questions else [
+        "Which city are you based in?",
+        "Is this affecting your live/production systems or a test environment?",
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — EXTRACT FIELD FROM ANSWER
+# EXTRACT FIELD FROM ANSWER
 # ─────────────────────────────────────────────────────────────────────────────
-
-# Roles that are useful for question answering (not skip roles)
-QUESTION_ROLES = {"identifier", "environment", "region", "application", "team", "os", "power_state"}
-
 
 def extract_field_from_answer(question: str, answer: str, rows: list) -> dict:
-    """
-    Map a user answer back to a column+value for DB filtering.
-
-    Strategy (in priority order):
-    1. Exact match in QUESTION_ROLES columns
-    2. Exact match in ANY column (catches device_type=Router, manufacturer=Cisco etc)
-    3. Substring match in QUESTION_ROLES columns only (avoids hostname false positives)
-    """
     if not rows or not answer.strip():
         return {"column": None, "value": None}
 
     a_lower   = answer.strip().lower()
     cols_meta = rows[0].get("_columns_meta", {})
 
-    # Build two maps:
-    # 1. question_col_values — QUESTION_ROLES only (for substring matching)
-    # 2. all_col_values — all non-skip columns (for exact matching only)
-    question_col_values: Dict[str, List[str]] = {}
-    all_col_values: Dict[str, List[str]]      = {}
+    all_col_values: Dict[str, List[str]] = {}
 
     for row in rows:
         for col, val in row.items():
@@ -327,43 +307,27 @@ def extract_field_from_answer(question: str, answer: str, rows: list) -> dict:
             if role in SKIP_ROLES:
                 continue
             sv = str(val)
-            # All columns for exact match
             if col not in all_col_values:
                 all_col_values[col] = []
             if sv not in all_col_values[col]:
                 all_col_values[col].append(sv)
-            # Question roles only for substring match
-            if role in QUESTION_ROLES:
-                if col not in question_col_values:
-                    question_col_values[col] = []
-                if sv not in question_col_values[col]:
-                    question_col_values[col].append(sv)
 
-    # Pass 1: Exact match in QUESTION_ROLES columns
-    for col, vals in question_col_values.items():
-        for v in vals:
-            if a_lower == v.lower():
-                return {"column": col, "value": v}
-
-    # Pass 2: Exact match in ALL columns (catches device_type, manufacturer etc)
+    # Pass 1: Exact match
     for col, vals in all_col_values.items():
         for v in vals:
             if a_lower == v.lower():
                 return {"column": col, "value": v}
 
-    # Pass 3: Substring match — QUESTION_ROLES only, avoid identifier false positives
+    # Pass 2: Substring match (non-technical columns only)
     best_col, best_val, best_score = None, None, 0
-    for col, vals in question_col_values.items():
-        role = cols_meta.get(col, {}).get("role", "other")
-        # Never substring-match identifier columns — too many false positives
-        # e.g. "Router" matching "core-router-mumbai-01"
-        if role == "identifier":
+    for col, vals in all_col_values.items():
+        if col.lower() in TECHNICAL_COLUMNS:
             continue
         for v in vals:
             v_lower = v.lower()
             if a_lower in v_lower or v_lower in a_lower:
-                score = len(v_lower) if a_lower in v_lower else len(a_lower)
-                if isinstance(score, int) and score > best_score:
+                score = len(v_lower)
+                if score > best_score:
                     best_score = score
                     best_col   = col
                     best_val   = v
@@ -371,57 +335,64 @@ def extract_field_from_answer(question: str, answer: str, rows: list) -> dict:
     if best_col:
         return {"column": best_col, "value": best_val}
 
-    best_col   = None
-    best_val   = None
-    best_score = 0
+    # Pass 3: City → data_centre mapping
+    CITY_MAP = {
+        "mumbai":    "DC-Mumbai",
+        "london":    "DC-London",
+        "singapore": "DC-Singapore",
+        "sydney":    "DC-Sydney",
+        "new york":  "DC-NewYork",
+        "frankfurt": "DC-Frankfurt",
+        "tokyo":     "DC-Tokyo",
+        "dubai":     "DC-Dubai",
+    }
+    for city, dc_prefix in CITY_MAP.items():
+        if city in a_lower:
+            # Find the matching data_centre value in assets
+            if "data_centre" in all_col_values:
+                for v in all_col_values["data_centre"]:
+                    if dc_prefix.lower() in v.lower():
+                        return {"column": "data_centre", "value": v}
+            # Fallback — return city as value
+            return {"column": "data_centre", "value": answer.strip()}
 
-    for col, vals in col_values.items():
-        for v in vals:
-            v_lower = v.lower()
-            # Exact match — highest priority
-            if a_lower == v_lower:
-                return {"column": col, "value": v}
-            # Substring match
-            if a_lower in v_lower or v_lower in a_lower:
-                score = len(v_lower) if a_lower in v_lower else len(a_lower)
-                if isinstance(score, int) and score > best_score:
-                    best_score = score
-                    best_col   = col
-                    best_val   = v
+    # Pass 4: Environment plain English mapping
+    ENV_MAP = {
+        "live": "Production", "production": "Production", "prod": "Production",
+        "real": "Production", "actual": "Production",
+        "test": "Staging", "staging": "Staging", "dev": "Development",
+        "development": "Development", "sandbox": "Development",
+    }
+    for keyword, env_val in ENV_MAP.items():
+        if keyword in a_lower:
+            if "environment" in all_col_values:
+                for v in all_col_values["environment"]:
+                    if env_val.lower() in v.lower():
+                        return {"column": "environment", "value": v}
+            return {"column": "environment", "value": env_val}
 
-    if best_col:
-        return {"column": best_col, "value": best_val}
-
-    # Last resort — map by question keywords
+    # Pass 5: Question keyword hints
     q = question.lower()
     role_hints = [
-        (["server", "hostname", "device", "instance", "which one", "name"], "identifier"),
-        (["region", "location", "office", "data centre", "where"],          "region"),
-        (["database", "db", "engine", "which db"],                          "application"),
-        (["environment", "production", "staging", "live", "test"],          "environment"),
-        (["team", "department"],                                             "team"),
+        (["city", "location", "office", "based in", "where"],         "data_centre"),
+        (["environment", "production", "staging", "live", "test"],     "environment"),
+        (["team", "department", "owns"],                               "team_name"),
+        (["type of system", "device type", "what type"],               "device_type"),
+        (["down", "offline", "running", "working"],                    "power_status"),
     ]
-    for keywords, role in role_hints:
+    for keywords, col in role_hints:
         if any(kw in q for kw in keywords):
-            col = next((c for c, m in cols_meta.items() if m.get("role") == role), None)
-            if col:
+            if col in all_col_values:
                 return {"column": col, "value": answer.strip()}
 
     return {"column": None, "value": None}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 5 — PROGRESSIVE MATCH
+# PROGRESSIVE MATCH
 # ─────────────────────────────────────────────────────────────────────────────
 
 def progressive_match(db: Session, collected_filters: dict, candidate_rows: list) -> dict:
-    """
-    Filter candidate_rows by collected_filters.
-    Returns:
-      matched:    best matching row dict (with owner info) or None
-      candidates: count of rows still matching
-      confident:  True only if exactly 1 row matches
-    """
     if not collected_filters or not candidate_rows:
         return {"matched": None, "candidates": 0, "confident": False}
 
@@ -437,7 +408,6 @@ def progressive_match(db: Session, collected_filters: dict, candidate_rows: list
             matching.append(row)
 
     if not matching:
-        # Relax filters — try with one fewer filter
         filter_items = list(collected_filters.items())
         for i in range(len(filter_items) - 1, -1, -1):
             relaxed = dict(filter_items[:i] + filter_items[i+1:])
@@ -467,10 +437,8 @@ def progressive_match(db: Session, collected_filters: dict, candidate_rows: list
 
 
 def _extract_owner(row: dict) -> dict:
-    """Extract ownership info from a matched asset row using column roles."""
     cols_meta = row.get("_columns_meta", {})
 
-    # Build role → first column map
     role_map = {}
     for col, meta in cols_meta.items():
         role = meta.get("role", "other")
@@ -486,7 +454,7 @@ def _extract_owner(row: dict) -> dict:
         "display_name":  row.get("_display_name", ""),
         "contact_email": get("contact_email"),
         "manager_email": get("manager_email"),
-        "director_email":get("director_email"),
+        "director_email": get("director_email"),
         "ops_email":     get("ops_email"),
         "identifier":    get("identifier"),
         "environment":   get("environment"),
