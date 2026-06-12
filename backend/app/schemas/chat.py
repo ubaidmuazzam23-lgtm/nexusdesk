@@ -1,14 +1,16 @@
 # Location: backend/app/schemas/chat.py
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 import uuid
 from app.models.ticket import TicketDomain, TicketPriority, TicketStatus
 
+_MAX_MSG_LEN = 4_000
+
 
 class ChatMessageRequest(BaseModel):
-    message:    str
+    message:    str = Field(..., min_length=1, max_length=_MAX_MSG_LEN)
     session_id: Optional[str] = None
     intent:     Optional[str] = "solve"
 

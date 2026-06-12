@@ -14,8 +14,11 @@
 
 import csv
 import io
+import logging
 from typing import Optional, List, Dict
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 from fastapi import HTTPException
 
 from app.models.asset import AssetRegistry
@@ -292,11 +295,10 @@ def upload_csv(
         if anchor:
             anchor.schema_meta = schema_meta
             db.commit()
-            print(f"\n  [AssetService] Schema snapshot refreshed — "
-                  f"{len(schema_meta.get('columns', {}))} identifier columns, "
-                  f"{schema_meta.get('total_assets', 0)} total assets.")
+            logger.info("[AssetService] Schema snapshot refreshed — %d identifier columns, %d total assets",
+                        len(schema_meta.get("columns", {})), schema_meta.get("total_assets", 0))
     except Exception as e:
-        print(f"  [AssetService] Schema snapshot generation failed (non-fatal): {e}")
+        logger.warning("[AssetService] Schema snapshot generation failed (non-fatal): %s", e)
 
     return {
         "inserted": inserted,

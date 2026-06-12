@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.core.database import get_db
 from app.core.dependencies import require_role, get_current_user
 from app.models.user import User, UserRole
+from app.api.v1.middleware.rate_limiter import knowledge_limiter
 from app.services.knowledge_service import (
     upload_document, upload_url, search_knowledge, list_documents,
     delete_document, get_similar_docs_for_ticket,
@@ -49,6 +50,7 @@ class UrlUploadRequest(BaseModel):
 def upload_url_endpoint(
     data: UrlUploadRequest,
     current_user: User = Depends(admin_or_engineer),
+    _: None = Depends(knowledge_limiter),
 ):
     return upload_url(
         url               = data.url,
@@ -67,6 +69,7 @@ async def upload_doc(
     domain: str = Form("other"),
     description: str = Form(""),
     current_user: User = Depends(admin_or_engineer),
+    _: None = Depends(knowledge_limiter),
 ):
     if not (any(file.filename.lower().endswith(ext) for ext in ALLOWED_EXTENSIONS) or
             file.content_type in ALLOWED_TYPES):
@@ -86,7 +89,7 @@ async def upload_doc(
 
 
 @router.post("/search")
-def search_docs(data: SearchRequest, current_user: User = Depends(get_current_user)):
+def search_docs(data: SearchRequest, current_user: User = Depends(get_current_user), _: None = Depends(knowledge_limiter)):
     return search_knowledge(query=data.query, n_results=data.n_results, domain=data.domain)
 
 

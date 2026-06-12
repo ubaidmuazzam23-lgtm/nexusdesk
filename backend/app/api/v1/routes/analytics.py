@@ -139,29 +139,38 @@ def analytics_over_time(days: int = 30, db: Session = Depends(get_db), admin: Us
 
 @router.get("/resolution-time")
 def analytics_resolution_time(db: Session = Depends(get_db), admin: User = Depends(get_admin)):
-    resolved = db.query(Ticket).filter(
+    from sqlalchemy import extract
+
+    # Compute average resolution minutes per priority fully in the DB
+    rows = db.query(
+        Ticket.priority,
+        func.avg(
+            func.extract("epoch", Ticket.resolved_at - Ticket.created_at) / 60
+        ).label("avg_minutes"),
+        func.count(Ticket.id).label("count"),
+    ).filter(
         Ticket.status == TicketStatus.RESOLVED,
         Ticket.resolved_at.isnot(None),
-    ).all()
+    ).group_by(Ticket.priority).all()
 
-    if not resolved:
+    if not rows:
         return {"avg_minutes": 0, "by_priority": {}}
 
-    times = [(t.resolved_at - t.created_at).total_seconds() / 60 for t in resolved]
-    avg = round(sum(times) / len(times), 1)
+    by_priority = {}
+    total_minutes = 0.0
+    total_count   = 0
+    for r in rows:
+        p = r.priority.value if hasattr(r.priority, "value") else str(r.priority)
+        avg_mins = round(float(r.avg_minutes or 0), 1)
+        by_priority[p] = avg_mins
+        total_minutes += float(r.avg_minutes or 0) * r.count
+        total_count   += r.count
 
-    by_priority: dict = defaultdict(list)
-    for t in resolved:
-        mins = (t.resolved_at - t.created_at).total_seconds() / 60
-        p = t.priority.value if hasattr(t.priority, "value") else str(t.priority)
-        by_priority[p].append(mins)
+    overall_avg = round(total_minutes / total_count, 1) if total_count else 0
 
     return {
-        "avg_minutes": avg,
-        "by_priority": {
-            p: round(sum(v) / len(v), 1)
-            for p, v in by_priority.items()
-        },
+        "avg_minutes": overall_avg,
+        "by_priority": by_priority,
     }
 
 # Add this to: backend/app/api/v1/routes/analytics.py

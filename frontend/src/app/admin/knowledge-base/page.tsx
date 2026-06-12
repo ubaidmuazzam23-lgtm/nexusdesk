@@ -75,7 +75,7 @@ export default function KnowledgeBasePage() {
   const [searching, setSearching] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  const hdrs = useCallback(() => ({ Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` }), [])
+  const hdrs = useCallback(() => ({ Authorization: `Bearer ${sessionStorage.getItem('access_token') || ''}` }), [])
 
   useEffect(() => { fetchDocs() }, [filter])
 

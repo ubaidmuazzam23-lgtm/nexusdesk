@@ -30,7 +30,7 @@ export default function OverviewPage() {
   const [loading,    setLoading]    = useState(true)
   const [lastUpdate, setLastUpdate] = useState(new Date())
 
-  const hdrs = () => ({ Authorization: `Bearer ${localStorage.getItem('access_token')||''}` })
+  const hdrs = () => ({ Authorization: `Bearer ${sessionStorage.getItem('access_token')||''}` })
 
   const fetchData = async () => {
     setLoading(true)

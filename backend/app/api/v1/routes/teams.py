@@ -136,6 +136,17 @@ def get_chat_history(
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
+    # Admins can read any team; everyone else must be a member or the team manager
+    role = current_user.role.lower() if isinstance(current_user.role, str) else current_user.role.value.lower()
+    if role != "admin":
+        is_member  = db.query(TeamMember).filter(
+            TeamMember.team_id == team.id,
+            TeamMember.user_id == current_user.id,
+        ).first()
+        is_manager = (team.manager_id == current_user.id)
+        if not is_member and not is_manager:
+            raise HTTPException(status_code=403, detail="Access denied — not a member of this team")
+
     messages = db.query(TeamMessage).filter(
         TeamMessage.team_id == team.id
     ).order_by(TeamMessage.created_at.asc()).limit(limit).all()

@@ -178,7 +178,7 @@ export default function TeamsPage() {
   const [onlineCount, setOnlineCount] = useState(0)
   const wsRef = useRef<WebSocket | null>(null)
   const chatBottomRef = useRef<HTMLDivElement>(null)
-  const currentUserId = typeof window !== 'undefined' ? localStorage.getItem('user_id') || '' : ''
+  const currentUserId = typeof window !== 'undefined' ? sessionStorage.getItem('user_id') || '' : ''
 
   // Modals
   const [showCreateTeam, setShowCreateTeam] = useState(false)
@@ -202,7 +202,7 @@ export default function TeamsPage() {
   })
 
   const hdrs = useCallback(() => ({
-    Authorization: `Bearer ${localStorage.getItem('access_token') || ''}`,
+    Authorization: `Bearer ${sessionStorage.getItem('access_token') || ''}`,
     'Content-Type': 'application/json',
   }), [])
 
@@ -246,11 +246,12 @@ export default function TeamsPage() {
       }
     } catch { }
 
-    // Connect WebSocket
-    const token = localStorage.getItem('access_token') || ''
-    const ws = new WebSocket(`${WS_URL}/api/v1/teams/${team.team_id}/ws?token=${token}`)
+    // Connect WebSocket — token sent as first message, NOT in URL
+    const ws = new WebSocket(`${WS_URL}/api/v1/teams/${team.team_id}/ws`)
 
     ws.onopen = () => {
+      const token = sessionStorage.getItem('access_token') || ''
+      ws.send(JSON.stringify({ type: 'auth', token }))
       setChatConnected(true)
     }
 

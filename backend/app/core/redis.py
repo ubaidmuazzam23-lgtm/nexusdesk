@@ -1,7 +1,9 @@
-import redis.asyncio as redis
-from app.core.config import settings
+# Thin wrapper — delegates to redis_client.py which handles lazy init.
+# Kept for backward compatibility; prefer importing from redis_client directly.
 
-redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+from app.core.redis_client import get_async_redis
+
 
 async def get_redis():
-    return redis_client
+    """Return the async Redis client or None if Redis is unavailable."""
+    return get_async_redis()

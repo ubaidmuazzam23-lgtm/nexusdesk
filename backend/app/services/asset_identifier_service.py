@@ -11,6 +11,7 @@
 #   If exactly 1 row found → confident match → route to owner.
 
 import json
+import logging
 import re
 from typing import Optional, List, Dict
 from sqlalchemy.orm import Session
@@ -18,6 +19,8 @@ from sqlalchemy import text
 import anthropic
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 _client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
@@ -89,9 +92,12 @@ def fetch_assets(db: Session, domain: str, problem: str, limit: int = 40) -> tup
                 unique_rows = fresh_db.execute(
                     text(f'SELECT * FROM "{tbl.table_name}" LIMIT {limit}')
                 ).fetchall()
-            except Exception:
-                try: fresh_db.rollback()
-                except Exception: pass
+            except Exception as _e:
+                logger.warning("[AssetFetch] Query failed for table %s: %s", tbl.table_name, _e)
+                try:
+                    fresh_db.rollback()
+                except Exception:
+                    pass
                 continue
 
             if keywords and unique_rows:
@@ -228,13 +234,11 @@ def generate_questions(db: Session, domain: str, problem: str) -> List[str]:
 
         questions = json.loads(raw)
         if isinstance(questions, list) and questions and all(isinstance(q, str) for q in questions):
-            print(f"\n  [AssetID] {len(questions)} questions generated for domain={domain}")
-            for i, q in enumerate(questions, 1):
-                print(f"    Q{i}: {q}")
+            logger.debug("[AssetID] %d questions generated for domain=%s", len(questions), domain)
             return questions[:3]
 
     except Exception as e:
-        print(f"  [AssetID] Question generation error: {e}")
+        logger.warning("[AssetID] Question generation error: %s", e)
 
     return _fallback_questions(rows)
 

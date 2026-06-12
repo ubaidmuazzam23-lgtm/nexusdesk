@@ -19,6 +19,7 @@
 import csv
 import io
 import json
+import logging
 import re
 import secrets
 import string
@@ -34,7 +35,18 @@ import anthropic
 from app.core.config import settings
 from app.models.asset_table_registry import AssetTableRegistry
 
+logger = logging.getLogger(__name__)
+
 _client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+_SAFE_TABLE_RE = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
+
+
+def _safe_table_name(name: str) -> str:
+    """Raise ValueError if name contains anything other than lowercase letters, digits, underscores."""
+    if not _SAFE_TABLE_RE.match(name):
+        raise ValueError(f"Unsafe table name rejected: {name!r}")
+    return name
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,12 +272,12 @@ def analyse_csv_with_ai(
             raw = raw.strip()
 
         result = json.loads(raw)
-        print(f"\n  [DynamicTable] AI analysis complete:")
-        print(f"    Merge: {result['merge_decision']['can_merge']} — {result['merge_decision']['reason']}")
+        logger.debug("[DynamicTable] AI analysis done: can_merge=%s",
+                     result.get("merge_decision", {}).get("can_merge"))
         return result
 
     except Exception as e:
-        print(f"  [DynamicTable] AI analysis error: {e}")
+        logger.error("[DynamicTable] AI analysis error: %s", e)
         # Fallback — no merge, basic role assignment
         column_roles = {}
         for norm in norm_headers:
@@ -335,7 +347,7 @@ def create_dynamic_table(
     # Check if table already exists
     inspector = inspect(db.bind)
     if table_name in inspector.get_table_names():
-        print(f"  [DynamicTable] Table {table_name} already exists — skipping create")
+        logger.debug("[DynamicTable] Table %s already exists — skipping create", table_name)
         return
 
     # Build column definitions — all TEXT for maximum flexibility
@@ -353,7 +365,7 @@ def create_dynamic_table(
     """
     db.execute(text(sql))
     db.commit()
-    print(f"  [DynamicTable] Created table: {table_name} with {len(norm_headers)} columns")
+    logger.info("[DynamicTable] Created table: %s with %d columns", table_name, len(norm_headers))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -432,7 +444,7 @@ def merge_into_existing_table(
     for col in norm_headers:
         if col not in table_cols:
             db.execute(text(f'ALTER TABLE "{target_table_name}" ADD COLUMN IF NOT EXISTS "{col}" TEXT'))
-            print(f"  [DynamicTable] Added column '{col}' to {target_table_name}")
+            logger.info("[DynamicTable] Added column '%s' to %s", col, target_table_name)
 
     db.commit()
     return insert_rows(db, target_table_name, rows, norm_headers, uploaded_by)
@@ -482,7 +494,7 @@ def upload_asset_csv(
             deduped.append(h)
     norm_headers = deduped
 
-    print(f"\n  [DynamicTable] Uploading '{display_name}' — {len(rows)} rows, {len(norm_headers)} columns")
+    logger.info("[DynamicTable] Uploading '%s' — %d rows, %d columns", display_name, len(rows), len(norm_headers))
 
     # ── Get existing tables ────────────────────────────────────────────────────
     existing_tables = db.query(AssetTableRegistry).filter(
@@ -545,7 +557,7 @@ def upload_asset_csv(
 
             merged       = True
             target_table = existing_entry
-            print(f"  [DynamicTable] Merged {inserted} rows into '{merge_table_name}'")
+            logger.info("[DynamicTable] Merged %d rows into '%s'", inserted, merge_table_name)
 
     if not merged:
         # Create new dynamic table
@@ -566,7 +578,7 @@ def upload_asset_csv(
         db.commit()
         db.refresh(registry_entry)
         target_table = registry_entry
-        print(f"  [DynamicTable] Created new table '{table_name}' with {inserted} rows")
+        logger.info("[DynamicTable] Created new table '%s' with %d rows", table_name, inserted)
 
     return {
         "table_name":    target_table.table_name,
@@ -633,6 +645,7 @@ def query_table(
     Query a single dynamic table with optional filters and search.
     Returns rows as list of dicts + total count.
     """
+    _safe_table_name(table_name)  # reject anything other than [a-z0-9_]
     tbl_entry = db.query(AssetTableRegistry).filter(
         AssetTableRegistry.table_name == table_name
     ).first()
@@ -688,6 +701,7 @@ def query_table(
 
 def delete_table(db: Session, table_name: str) -> dict:
     """Drop a dynamic table and remove from registry."""
+    _safe_table_name(table_name)
     entry = db.query(AssetTableRegistry).filter(
         AssetTableRegistry.table_name == table_name
     ).first()
@@ -697,7 +711,7 @@ def delete_table(db: Session, table_name: str) -> dict:
     try:
         db.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
     except Exception as e:
-        print(f"  [DynamicTable] Drop table error: {e}")
+        logger.error("[DynamicTable] Drop table error for %s: %s", table_name, e)
 
     db.delete(entry)
     db.commit()
@@ -710,10 +724,11 @@ def delete_all_tables(db: Session) -> dict:
     count   = 0
     for entry in entries:
         try:
+            _safe_table_name(entry.table_name)
             db.execute(text(f'DROP TABLE IF EXISTS "{entry.table_name}"'))
             count += 1
         except Exception as e:
-            print(f"  [DynamicTable] Drop error for {entry.table_name}: {e}")
+            logger.error("[DynamicTable] Drop error for %s: %s", entry.table_name, e)
     db.query(AssetTableRegistry).delete()
     db.commit()
     return {"message": f"Deleted {count} asset tables"}
@@ -721,6 +736,7 @@ def delete_all_tables(db: Session) -> dict:
 
 def delete_rows(db: Session, table_name: str, row_ids: List[str]) -> dict:
     """Delete specific rows from a dynamic table."""
+    _safe_table_name(table_name)
     entry = db.query(AssetTableRegistry).filter(
         AssetTableRegistry.table_name == table_name
     ).first()
@@ -829,7 +845,7 @@ def count_matches(
             ).scalar() or 0
             total += cnt
         except Exception as e:
-            print(f"  [DynamicTable] Count error on {tbl.table_name}: {e}")
+            logger.debug("[DynamicTable] Count error on %s: %s", tbl.table_name, e)
 
     return total
 
@@ -894,7 +910,7 @@ def find_asset_owner(
                 })
 
         except Exception as e:
-            print(f"  [DynamicTable] Query error on {tbl.table_name}: {e}")
+            logger.debug("[DynamicTable] Query error on %s: %s", tbl.table_name, e)
             continue
 
     if not candidates:

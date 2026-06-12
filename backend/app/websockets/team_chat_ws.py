@@ -1,5 +1,8 @@
 # Location: ./backend/app/websockets/team_chat_ws.py
 
+import json
+import logging
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
@@ -10,6 +13,9 @@ from app.websockets.connection_manager import manager
 from datetime import datetime
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+_MAX_WS_MSG_LEN = 4_000
 
 
 def _get_user_from_token(token: str, db: Session):
@@ -45,11 +51,27 @@ def _get_role_str(user: User) -> str:
 
 
 @router.websocket("/api/v1/teams/{team_id}/ws")
-async def team_chat_websocket(websocket: WebSocket, team_id: str, token: str):
+async def team_chat_websocket(websocket: WebSocket, team_id: str):
+    """
+    Authentication: client must send {"type":"auth","token":"<access_token>"}
+    as the first message after the connection is established.
+    Token is NOT accepted as a URL query parameter.
+    """
+    await websocket.accept()
     db = SessionLocal()
     try:
+        # Wait for auth message — first frame only
+        try:
+            raw_auth = await websocket.receive_text()
+            auth_data = json.loads(raw_auth)
+            token = auth_data.get("token", "")
+        except Exception:
+            await websocket.close(code=4001)
+            return
+
         user = _get_user_from_token(token, db)
         if not user:
+            await websocket.send_text(json.dumps({"type": "error", "message": "Unauthorized"}))
             await websocket.close(code=4001)
             return
 
@@ -59,6 +81,7 @@ async def team_chat_websocket(websocket: WebSocket, team_id: str, token: str):
             return
 
         if not _is_allowed(user, team, db):
+            await websocket.send_text(json.dumps({"type": "error", "message": "Forbidden"}))
             await websocket.close(code=4003)
             return
 
@@ -78,11 +101,17 @@ async def team_chat_websocket(websocket: WebSocket, team_id: str, token: str):
                 data = await websocket.receive_text()
                 if not data.strip():
                     continue
+                if len(data) > _MAX_WS_MSG_LEN:
+                    await websocket.send_text(json.dumps({
+                        "type":    "error",
+                        "message": f"Message too long (max {_MAX_WS_MSG_LEN} chars).",
+                    }))
+                    continue
 
                 msg = TeamMessage(
                     team_id=team.id,
                     sender_id=user.id,
-                    message=data.strip(),
+                    message=data.strip()[:_MAX_WS_MSG_LEN],
                 )
                 db.add(msg)
                 db.commit()

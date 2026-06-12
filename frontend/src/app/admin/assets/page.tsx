@@ -145,7 +145,7 @@ export default function AssetsPage() {
   const fileRef = useRef<HTMLInputElement>(null)
 
   const hdrs = useCallback(() => ({
-    Authorization: `Bearer ${localStorage.getItem('access_token') || ''}`,
+    Authorization: `Bearer ${sessionStorage.getItem('access_token') || ''}`,
   }), [])
 
   // ── Fetch all tables ────────────────────────────────────────────────────────
@@ -202,7 +202,7 @@ export default function AssetsPage() {
       form.append('force_new_table', String(forceNew))
       const r = await fetch(`${API}/api/v1/assets/upload`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
+        headers: { Authorization: `Bearer ${sessionStorage.getItem('access_token') || ''}` },
         body: form,
       })
       const d = await r.json()

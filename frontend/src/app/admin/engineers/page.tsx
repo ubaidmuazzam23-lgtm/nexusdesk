@@ -78,7 +78,7 @@ export default function EngineersPage() {
     region: 'India', timezone: 'Asia/Kolkata', seniority_level: 'mid', max_ticket_capacity: 10,
   })
 
-  const hdrs = useCallback(() => ({ Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` }), [])
+  const hdrs = useCallback(() => ({ Authorization: `Bearer ${sessionStorage.getItem('access_token') || ''}` }), [])
 
   useEffect(() => { fetchEngineers() }, [search, statusFilter])
 

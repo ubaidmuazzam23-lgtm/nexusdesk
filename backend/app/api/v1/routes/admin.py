@@ -16,6 +16,7 @@ from app.services.admin_service import (
     update_engineer, deactivate_engineer, reactivate_engineer,
     get_platform_overview, list_all_tickets,
 )
+from app.api.v1.middleware.rate_limiter import admin_limiter
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -30,7 +31,12 @@ def overview(db: Session = Depends(get_db), admin: User = Depends(get_admin)):
 
 
 @router.post("/engineers", response_model=EngineerResponse, status_code=201)
-def create_eng(data: CreateEngineerRequest, db: Session = Depends(get_db), admin: User = Depends(get_admin)):
+def create_eng(
+    data: CreateEngineerRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_admin),
+    _: None = Depends(admin_limiter),
+):
     return create_engineer(db, data, admin)
 
 
@@ -51,18 +57,34 @@ def get_eng(engineer_id: str, db: Session = Depends(get_db), admin: User = Depen
 
 
 @router.patch("/engineers/{engineer_id}", response_model=EngineerResponse)
-def update_eng(engineer_id: str, data: UpdateEngineerRequest, db: Session = Depends(get_db), admin: User = Depends(get_admin)):
-    return update_engineer(db, engineer_id, data)
+def update_eng(
+    engineer_id: str,
+    data: UpdateEngineerRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_admin),
+    _: None = Depends(admin_limiter),
+):
+    return update_engineer(db, engineer_id, data, admin)
 
 
 @router.delete("/engineers/{engineer_id}")
-def deactivate_eng(engineer_id: str, db: Session = Depends(get_db), admin: User = Depends(get_admin)):
-    return deactivate_engineer(db, engineer_id)
+def deactivate_eng(
+    engineer_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_admin),
+    _: None = Depends(admin_limiter),
+):
+    return deactivate_engineer(db, engineer_id, admin)
 
 
 @router.post("/engineers/{engineer_id}/reactivate")
-def reactivate_eng(engineer_id: str, db: Session = Depends(get_db), admin: User = Depends(get_admin)):
-    return reactivate_engineer(db, engineer_id)
+def reactivate_eng(
+    engineer_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_admin),
+    _: None = Depends(admin_limiter),
+):
+    return reactivate_engineer(db, engineer_id, admin)
 
 
 @router.get("/tickets", response_model=List[AdminTicketResponse])

@@ -1,0 +1,16 @@
+.env
+.env.*
+*.pyc
+__pycache__/
+.git/
+.gitignore
+itsupport-env/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+uploads/
+patch_*.py
+fix_*.py
+*.log

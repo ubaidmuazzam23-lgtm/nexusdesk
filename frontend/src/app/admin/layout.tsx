@@ -20,8 +20,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     setMounted(true)
-    const name = localStorage.getItem('full_name')
-    const role = localStorage.getItem('role')
+    const name = sessionStorage.getItem('full_name')
+    const role = sessionStorage.getItem('role')
     const savedTheme = localStorage.getItem('admin_theme')
     if (role !== 'admin') window.location.replace('/auth/login')
     if (name) setFullName(name)
@@ -35,7 +35,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   }
 
   const handleLogout = () => {
-    localStorage.clear()
+    sessionStorage.removeItem('access_token')
+    sessionStorage.removeItem('refresh_token')
+    sessionStorage.removeItem('role')
+    sessionStorage.removeItem('full_name')
+    sessionStorage.removeItem('email')
+    sessionStorage.removeItem('user_id')
     window.location.replace('/auth/login')
   }
 

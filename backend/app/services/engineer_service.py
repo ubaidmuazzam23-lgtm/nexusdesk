@@ -1,8 +1,11 @@
 # File: backend/app/services/engineer_service.py
 
+import logging
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 from app.models.user import User
 from app.models.engineer import Engineer, AvailabilityStatus
@@ -58,7 +61,7 @@ def get_engineer_tickets(db: Session, user: User, status: str = None) -> list:
         query = query.filter(Ticket.status == status)
     # Sort by priority then created_at
     priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    tickets = query.all()
+    tickets = query.limit(200).all()
     tickets.sort(key=lambda t: (priority_order.get(t.priority.value, 99), t.created_at))
     return [_ticket_to_response(db, t) for t in tickets]
 
@@ -129,9 +132,9 @@ AI Diagnosis: {ticket.ai_diagnosis or 'N/A'}
                     uploaded_by=str(user.id),
                     uploaded_by_role="engineer_auto",
                 )
-                print(f"\n  🧠 KB Auto-indexed: {ticket.ticket_number} [{domain}]")
+                logger.info("[KB] Auto-indexed ticket %s [%s]", ticket.ticket_number, domain)
             except Exception as e:
-                print(f"\n  ⚠ KB auto-index failed (non-critical): {e}")
+                logger.warning("[KB] Auto-index failed (non-critical): %s", e)
         # ─────────────────────────────────────────────────────────────────────
 
     db.commit()
@@ -196,9 +199,16 @@ def _ticket_to_response(db: Session, ticket: Ticket) -> TicketResponse:
         TicketMessage.ticket_id == ticket.id
     ).order_by(TicketMessage.created_at).all()
 
+    # Batch-load all senders in one query to avoid N+1
+    sender_ids   = {msg.sender_id for msg in messages if msg.sender_id}
+    sender_map   = {
+        u.id: u
+        for u in db.query(User).filter(User.id.in_(sender_ids)).all()
+    } if sender_ids else {}
+
     msg_responses = []
     for msg in messages:
-        sender = db.query(User).filter(User.id == msg.sender_id).first()
+        sender = sender_map.get(msg.sender_id)
         msg_responses.append(TicketMessageResponse(
             id=msg.id,
             sender_id=msg.sender_id,
@@ -277,9 +287,9 @@ AI Diagnosis: {ticket.ai_diagnosis or 'N/A'}
             uploaded_by=str(user.id),
             uploaded_by_role="engineer_auto",
         )
-        print(f"\n  🧠 KB Auto-indexed: {ticket.ticket_number} [{domain}]")
+        logger.info("[KB] Auto-indexed ticket %s [%s]", ticket.ticket_number, domain)
     except Exception as e:
-        print(f"\n  ⚠ KB auto-index failed (non-critical): {e}")
+        logger.warning("[KB] Auto-index failed (non-critical): %s", e)
     # ─────────────────────────────────────────────────────────────────────────
 
     db.commit()

@@ -20,6 +20,7 @@ from app.services.chat_service import (
     get_user_tickets, get_user_ticket,
     analyze_screenshot, SCREENSHOT_DIR,
 )
+from app.api.v1.middleware.rate_limiter import chat_limiter, upload_limiter
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
@@ -33,6 +34,7 @@ def chat_message(
     data: ChatMessageRequest,
     db: Session = Depends(get_db),
     user: User = Depends(get_user),
+    _: None = Depends(chat_limiter),
 ):
     return process_message(db, user, data)
 
@@ -41,8 +43,8 @@ def chat_message(
 async def upload_screenshot(
     session_id: str = Form(...),
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
     user: User = Depends(get_user),
+    _: None = Depends(upload_limiter),
 ):
     """Upload a screenshot — saved to disk + analyzed by CNN."""
     allowed = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"]

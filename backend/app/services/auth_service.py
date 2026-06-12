@@ -1,11 +1,12 @@
 # Location: ./backend/app/services/auth_service.py
 
+import time as _time
+import threading
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from datetime import datetime
 import secrets
 import string
-import threading
 
 from app.models.user import User, UserRole
 from app.models.engineer import Engineer, AvailabilityStatus
@@ -20,6 +21,44 @@ from app.schemas.auth import (
 from app.services.email_service import send_temp_password_email, send_welcome_email
 
 
+# ── Brute-force / account lockout ────────────────────────────────────────────
+# Tracks failed login attempts per email. After _MAX_FAILURES within the
+# _LOCKOUT_SECS window the account is temporarily locked.
+
+_failed_logins: dict[str, list[float]] = {}   # email → [monotonic timestamps]
+_login_lock    = threading.Lock()
+_MAX_FAILURES  = 5
+_LOCKOUT_SECS  = 900   # 15 minutes
+
+
+def _check_lockout(email: str) -> None:
+    now   = _time.monotonic()
+    with _login_lock:
+        times = [t for t in _failed_logins.get(email, []) if now - t < _LOCKOUT_SECS]
+        _failed_logins[email] = times
+        if len(times) >= _MAX_FAILURES:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Account temporarily locked after {_MAX_FAILURES} failed attempts. Try again in 15 minutes.",
+                headers={"Retry-After": str(_LOCKOUT_SECS)},
+            )
+
+
+def _record_failure(email: str) -> None:
+    now = _time.monotonic()
+    with _login_lock:
+        times = _failed_logins.get(email, [])
+        times.append(now)
+        _failed_logins[email] = times
+
+
+def _clear_failures(email: str) -> None:
+    with _login_lock:
+        _failed_logins.pop(email, None)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _generate_temp_password(length: int = 10) -> str:
     chars = string.ascii_uppercase + string.ascii_lowercase + string.digits + '#@!$'
     pwd = [
@@ -32,6 +71,8 @@ def _generate_temp_password(length: int = 10) -> str:
     secrets.SystemRandom().shuffle(pwd)
     return ''.join(pwd)
 
+
+# ── Service functions ─────────────────────────────────────────────────────────
 
 def register_user(db: Session, data: UserRegisterRequest) -> User:
     existing = db.query(User).filter(User.email == data.email).first()
@@ -56,9 +97,14 @@ def register_user(db: Session, data: UserRegisterRequest) -> User:
 
 
 def login_user(db: Session, data: LoginRequest) -> LoginResponse:
+    # Lockout check before DB query — prevents timing oracle
+    _check_lockout(data.email)
+
     user = db.query(User).filter(User.email == data.email).first()
     if not user or not verify_password(data.password, user.hashed_password):
+        _record_failure(data.email)
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account is deactivated. Contact your administrator.")
 
@@ -72,6 +118,9 @@ def login_user(db: Session, data: LoginRequest) -> LoginResponse:
     if role == "manager":
         if not user.is_verified:
             raise HTTPException(status_code=403, detail="PENDING_ACTIVATION")
+
+    # Successful login — clear any recorded failures
+    _clear_failures(data.email)
 
     user.last_login = datetime.utcnow()
     db.commit()
@@ -101,11 +150,12 @@ def refresh_access_token(db: Session, refresh_token: str) -> RefreshResponse:
 
 
 def forgot_password(db: Session, data: ForgotPasswordRequest) -> dict:
+    _GENERIC_MSG = {"message": "If an account exists for that email address, a temporary password has been sent."}
+
     user = db.query(User).filter(User.email == data.email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="No account found with this email address")
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="This account has been deactivated")
+    if not user or not user.is_active:
+        return _GENERIC_MSG
+
     temp_password = _generate_temp_password()
     user.hashed_password = hash_password(temp_password)
     db.commit()
@@ -114,7 +164,7 @@ def forgot_password(db: Session, data: ForgotPasswordRequest) -> dict:
         args=(user.email, user.full_name, temp_password),
         daemon=True,
     ).start()
-    return {"message": f"A temporary password has been sent to {data.email}"}
+    return _GENERIC_MSG
 
 
 def activate_engineer_with_credentials(
@@ -122,7 +172,7 @@ def activate_engineer_with_credentials(
 ) -> dict:
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        raise HTTPException(status_code=404, detail="No account found with this email")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     role = user.role.lower() if isinstance(user.role, str) else user.role.value.lower()
 
@@ -154,3 +204,4 @@ def activate_engineer_with_credentials(
         user.is_verified = True
         db.commit()
         return {"message": "Manager account activated successfully. You can now sign in."}
+

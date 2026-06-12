@@ -116,12 +116,17 @@ def get_aggregate_stats(db: Session = Depends(get_db), current_user: User = Depe
 @router.delete("/predictions/{ticket_number}")
 def delete_prediction(ticket_number: str, db: Session = Depends(get_db), current_user: User = Depends(require_role(UserRole.ADMIN))):
     from app.models.ticket import Ticket
-    ticket = db.execute(text("SELECT id FROM tickets WHERE ticket_number = :tn"), {"tn": ticket_number}).fetchone()
+    from fastapi import HTTPException
+    ticket = db.query(Ticket).filter(Ticket.ticket_number == ticket_number).first()
     if not ticket:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Ticket not found")
-    db.execute(text("DELETE FROM tickets WHERE ticket_number = :tn"), {"tn": ticket_number})
+    ticket.model_predictions = None
+    ticket.ai_diagnosis      = None
+    ticket.ai_confidence     = None
+    ticket.ai_attempted      = False
+    ticket.ai_resolved       = False
+    ticket.cnn_image_result  = None
     db.commit()
-    return {"deleted": True}
+    return {"cleared": True, "ticket_number": ticket_number}
 
     

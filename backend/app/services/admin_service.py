@@ -1,5 +1,6 @@
 # File: backend/app/services/admin_service.py
 
+import logging
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from datetime import datetime
@@ -8,6 +9,8 @@ import string
 import threading
 
 from app.models.user import User, UserRole
+
+logger = logging.getLogger(__name__)
 from app.models.engineer import Engineer, AvailabilityStatus
 from app.models.ticket import Ticket, TicketStatus
 from app.core.security import hash_password
@@ -22,20 +25,24 @@ from app.services.email_service import (
 )
 
 
+_ENGINEER_ID_MAX_ATTEMPTS = 100
+
+
 def _generate_engineer_id(db: Session) -> str:
-    while True:
+    for _ in range(_ENGINEER_ID_MAX_ATTEMPTS):
         eid = f"ENG-{secrets.randbelow(9000) + 1000}"
         if not db.query(Engineer).filter(Engineer.engineer_id == eid).first():
             return eid
+    raise RuntimeError("Could not generate a unique engineer ID after multiple attempts")
 
 
 def _generate_temp_password(length: int = 10) -> str:
-    chars = string.ascii_uppercase + string.ascii_lowercase + string.digits
+    chars = string.ascii_uppercase + string.ascii_lowercase + string.digits + '#@!$'
     pwd = [
         secrets.choice(string.ascii_uppercase),
         secrets.choice(string.ascii_lowercase),
         secrets.choice(string.digits),
-        secrets.choice(string.ascii_uppercase),
+        secrets.choice('#@!$'),
     ]
     pwd += [secrets.choice(chars) for _ in range(length - 4)]
     secrets.SystemRandom().shuffle(pwd)
@@ -79,6 +86,9 @@ def create_engineer(db: Session, data: CreateEngineerRequest, admin_user: User) 
     db.refresh(engineer)
     db.refresh(user)
 
+    logger.info("[AUDIT] admin=%s created engineer=%s email=%s region=%s",
+                admin_user.email, engineer_id, data.email, data.region)
+
     threading.Thread(
         target=send_engineer_credentials_email,
         args=(user.email, user.full_name, engineer_id, temp_password),
@@ -116,7 +126,7 @@ def get_engineer(db: Session, engineer_id: str) -> EngineerResponse:
     return _engineer_to_response(*result)
 
 
-def update_engineer(db: Session, engineer_id: str, data: UpdateEngineerRequest) -> EngineerResponse:
+def update_engineer(db: Session, engineer_id: str, data: UpdateEngineerRequest, admin_user: User) -> EngineerResponse:
     result = db.query(Engineer, User).join(User, Engineer.user_id == User.id).filter(
         Engineer.engineer_id == engineer_id
     ).first()
@@ -133,10 +143,12 @@ def update_engineer(db: Session, engineer_id: str, data: UpdateEngineerRequest) 
     db.commit()
     db.refresh(engineer)
     db.refresh(user)
+    logger.info("[AUDIT] admin=%s updated engineer=%s fields=%s",
+                admin_user.email, engineer_id, data.model_dump(exclude_none=True))
     return _engineer_to_response(engineer, user)
 
 
-def deactivate_engineer(db: Session, engineer_id: str) -> dict:
+def deactivate_engineer(db: Session, engineer_id: str, admin_user: User) -> dict:
     result = db.query(Engineer, User).join(User, Engineer.user_id == User.id).filter(
         Engineer.engineer_id == engineer_id
     ).first()
@@ -148,11 +160,13 @@ def deactivate_engineer(db: Session, engineer_id: str) -> dict:
     user.is_active = False
     engineer.availability_status = AvailabilityStatus.AWAY
     db.commit()
+    logger.info("[AUDIT] admin=%s deactivated engineer=%s email=%s",
+                admin_user.email, engineer_id, user.email)
     threading.Thread(target=send_engineer_deactivated_email, args=(user.email, user.full_name, engineer_id), daemon=True).start()
     return {"message": f"Engineer {engineer_id} deactivated"}
 
 
-def reactivate_engineer(db: Session, engineer_id: str) -> dict:
+def reactivate_engineer(db: Session, engineer_id: str, admin_user: User) -> dict:
     result = db.query(Engineer, User).join(User, Engineer.user_id == User.id).filter(
         Engineer.engineer_id == engineer_id
     ).first()
@@ -164,11 +178,16 @@ def reactivate_engineer(db: Session, engineer_id: str) -> dict:
     user.is_active = True
     engineer.availability_status = AvailabilityStatus.AVAILABLE
     db.commit()
+    logger.info("[AUDIT] admin=%s reactivated engineer=%s email=%s",
+                admin_user.email, engineer_id, user.email)
     threading.Thread(target=send_engineer_reactivated_email, args=(user.email, user.full_name, engineer_id), daemon=True).start()
     return {"message": f"Engineer {engineer_id} reactivated"}
 
 
 # ── Admin Tickets ─────────────────────────────────────────────────────────────
+
+_TICKET_LIST_LIMIT = 500
+
 
 def list_all_tickets(
     db: Session,
@@ -193,7 +212,7 @@ def list_all_tickets(
             (Ticket.description.ilike(s))
         )
 
-    tickets = query.order_by(Ticket.created_at.desc()).all()
+    tickets = query.order_by(Ticket.created_at.desc()).limit(_TICKET_LIST_LIMIT).all()
     return [_ticket_to_response(db, t) for t in tickets]
 
 
