@@ -149,7 +149,7 @@
 #                 "Go to api.slack.com/apps → OAuth & Permissions → Bot Token Scopes → add files:read → reinstall app."
 #             )
 
-#         print(f"  [ImageDebug] size={len(image_bytes)} first={image_bytes[:8].hex()} slack_mimetype={file_mimetype}")
+#         logger.debug("[ImageDebug] size=%d slack_mimetype=%s", len(image_bytes), file_mimetype)
 
 #         # Re-use existing Vision analysis in chat_service, passing mimetype
 #         from app.services.chat_service import analyze_screenshot
@@ -409,7 +409,7 @@
 #         # Step 2 — upload bytes to the URL
 #         import requests as _req
 #         with open(screenshot_path, "rb") as f:
-#             up = _req.post(upload_url, files={"file": (filename, f, "image/png")})
+#             up = _req.post(upload_url, files={"file": (filename, f, "image/png")}, timeout=30)
 #         if up.status_code != 200:
 #             logger.error(f"[Screenshot] upload POST failed: {up.status_code} {up.text[:200]}")
 #             return
@@ -1057,7 +1057,7 @@
 #                 ticket.status      = TicketStatus.RESOLVED
 #                 ticket.resolved_at = datetime.utcnow()
 #                 db.commit()
-#                 print(f"  [AutoResolve] Ticket {ticket_result.ticket_number} raised and marked resolved (AI resolved)")
+#                 logger.info("[AutoResolve] Ticket %s raised and marked resolved (AI resolved)", ticket_result.ticket_number)
 
 #         _reset_session(slack_user_id)
 
@@ -1260,7 +1260,7 @@
 #             engineer_name     = slack_eng["name"] if slack_eng else None,
 #             screenshot_path   = session.get("screenshot_path"),
 #         )
-#         print(f"  [Screenshot] path at escalation: {session.get('screenshot_path')}")
+#         logger.debug("[Screenshot] path at escalation present=%s", bool(session.get("screenshot_path")))
 
 #         if slack_eng:
 #             try:
@@ -1373,6 +1373,18 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+# ── Anthropic client singleton ────────────────────────────────────────────────
+_cl = None
+
+def _get_cl():
+    global _cl
+    if _cl is None:
+        import anthropic as _anthropic
+        from app.core.config import settings as _settings
+        _cl = _anthropic.Anthropic(api_key=_settings.ANTHROPIC_API_KEY)
+    return _cl
+
+
 # ── Button helper ─────────────────────────────────────────────────────────────
 def _say_blocks(say, block_fn):
     """Send a Block Kit message. Falls back to plain text if blocks fail."""
@@ -1398,8 +1410,8 @@ def _say_reply(say, reply: str, blocks_mod):
             ("Is there a hard deadline",                   blocks_mod.hard_deadline),
             ("Do you need help with this today",           blocks_mod.help_today),
             ("When should the network team pick this up",  blocks_mod.next_sprint),
-            ("I have tried 3 troubleshooting steps",       blocks_mod.mid_check_no_runbook),
-            ("I have gone through several troubleshooting",blocks_mod.mid_check_runbook),
+            ("I have tried 3 troubleshooting steps so far", blocks_mod.mid_check_no_runbook),
+            ("I have gone through several troubleshooting", blocks_mod.mid_check_runbook),
         ]
     for substr, block_fn in _REPLY_TO_BLOCK:
         if substr.lower() in reply.lower():
@@ -1412,14 +1424,28 @@ def _say_reply(say, reply: str, blocks_mod):
 _slack_to_session: dict = {}
 # Track pending new conversation confirmations
 _pending_new: dict = {}
-# Track users waiting for ticket raise confirmation (session_id → True)
+# Track users waiting for ticket raise confirmation (slack_user_id → True)
 _pending_ticket_confirm: dict = {}
+
+_SLACK_SESSION_MAX = 10_000  # ~10k concurrent Slack users max
+
 TICKETS_CHANNEL = "network-tickets"
 CONSULT_CHANNEL = "network-consult"
 
 
+def _evict_slack_dicts() -> None:
+    """Drop oldest 10% of session entries when cap is reached."""
+    if len(_slack_to_session) >= _SLACK_SESSION_MAX:
+        evict_n = max(1, _SLACK_SESSION_MAX // 10)
+        for uid in list(_slack_to_session.keys())[:evict_n]:
+            _slack_to_session.pop(uid, None)
+            _pending_new.pop(uid, None)
+            _pending_ticket_confirm.pop(uid, None)
+
+
 def _get_or_create_session(slack_user_id: str) -> str:
     if slack_user_id not in _slack_to_session:
+        _evict_slack_dicts()
         _slack_to_session[slack_user_id] = f"slack_{slack_user_id}_{uuid.uuid4().hex[:8]}"
     return _slack_to_session[slack_user_id]
 
@@ -1428,6 +1454,7 @@ def _reset_session(slack_user_id: str):
     if slack_user_id in _slack_to_session:
         del _slack_to_session[slack_user_id]
     _pending_ticket_confirm.pop(slack_user_id, None)
+    _pending_new.pop(slack_user_id, None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1468,9 +1495,9 @@ def analyze_slack_image(
             ct = resp.headers.get("Content-Type", "")
             if resp.status_code == 200 and "text/html" not in ct:
                 image_bytes = resp.content
-                print(f"  [ImageDownload] method=bearer size={len(image_bytes)} ct={ct}")
+                logger.debug("[ImageDownload] bearer OK size=%d ct=%s", len(image_bytes), ct)
         except Exception as e:
-            print(f"  [ImageDownload] bearer failed: {e}")
+            logger.debug("[ImageDownload] bearer failed: %s", e)
 
         # Method 2: files_info → re-fetch with SDK client session
         if not image_bytes:
@@ -1496,22 +1523,21 @@ def analyze_slack_image(
                         ct = resp.headers.get("Content-Type", "")
                         if resp.status_code == 200 and "text/html" not in ct:
                             image_bytes = resp.content
-                            print(f"  [ImageDownload] method=files_info size={len(image_bytes)} ct={ct}")
+                            logger.debug("[ImageDownload] files_info OK size=%d ct=%s", len(image_bytes), ct)
                         else:
-                            print(f"  [ImageDownload] files_info fetch failed status={resp.status_code} ct={ct}")
-                            print(f"  [ImageDownload] response preview: {resp.content[:200]}")
+                            logger.warning("[ImageDownload] files_info fetch failed status=%d ct=%s",
+                                           resp.status_code, ct)
             except Exception as e:
-                print(f"  [ImageDownload] files_info method failed: {e}")
+                logger.debug("[ImageDownload] files_info method failed: %s", e)
 
         if not image_bytes:
-            # Scope issue — bot token likely missing files:read
-            print("  [ImageDownload] ALL methods failed — bot token may be missing files:read scope")
+            logger.warning("[ImageDownload] ALL methods failed — bot token may be missing files:read scope")
             raise ValueError(
                 "Could not download image. Ensure the Slack bot has 'files:read' scope. "
                 "Go to api.slack.com/apps → OAuth & Permissions → Bot Token Scopes → add files:read → reinstall app."
             )
 
-        print(f"  [ImageDebug] size={len(image_bytes)} first={image_bytes[:8].hex()} slack_mimetype={file_mimetype}")
+        logger.debug("[ImageDebug] size=%d slack_mimetype=%s", len(image_bytes), file_mimetype)
 
         # Re-use existing Vision analysis in chat_service, passing mimetype
         from app.services.chat_service import analyze_screenshot
@@ -1563,10 +1589,18 @@ def _get_or_create_engineer_consult_channel(slack_client, engineer_slack_id: str
 def _get_or_create_consult_channel(slack_client) -> Optional[str]:
     """Get or create #network-consult channel."""
     try:
-        result = slack_client.conversations_list(types="public_channel,private_channel")
-        for ch in result.get("channels", []):
-            if ch["name"] == CONSULT_CHANNEL:
-                return ch["id"]
+        cursor = None
+        while True:
+            kwargs = {"types": "public_channel,private_channel", "limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            result = slack_client.conversations_list(**kwargs)
+            for ch in result.get("channels", []):
+                if ch["name"] == CONSULT_CHANNEL:
+                    return ch["id"]
+            cursor = (result.get("response_metadata") or {}).get("next_cursor")
+            if not cursor:
+                break
         result     = slack_client.conversations_create(name=CONSULT_CHANNEL)
         channel_id = result["channel"]["id"]
         slack_client.chat_postMessage(
@@ -1583,9 +1617,7 @@ def _get_or_create_consult_channel(slack_client) -> Optional[str]:
 def _handle_consult_escalation(slack_client, session, user_name, say, slack_user_id=None, is_planning=False):
     """Post rich consult summary to #network-consult channel and notify user of assigned engineer."""
     try:
-        from app.core.config import settings as _settings
-        import anthropic as _anthropic
-        _cl = _anthropic.Anthropic(api_key=_settings.ANTHROPIC_API_KEY)
+        _acl = _get_cl()
 
         msgs  = session.get("messages", [])
         convo = "\n".join(
@@ -1599,7 +1631,7 @@ def _handle_consult_escalation(slack_client, session, user_name, say, slack_user
             convo += f"\n\nScreenshot Analysis:\n{session['screenshot_analysis']}"
 
         try:
-            resp = _cl.messages.create(
+            resp = _acl.messages.create(
                 model      = "claude-sonnet-4-5",
                 max_tokens = 700,
                 messages   = [{"role": "user", "content": (
@@ -1679,10 +1711,18 @@ def _handle_consult_escalation(slack_client, session, user_name, say, slack_user
 def _get_or_create_tickets_channel(slack_client) -> Optional[str]:
     """Get or create #network-tickets channel, return channel ID."""
     try:
-        result = slack_client.conversations_list(types="public_channel,private_channel")
-        for ch in result.get("channels", []):
-            if ch["name"] == TICKETS_CHANNEL:
-                return ch["id"]
+        cursor = None
+        while True:
+            kwargs = {"types": "public_channel,private_channel", "limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            result = slack_client.conversations_list(**kwargs)
+            for ch in result.get("channels", []):
+                if ch["name"] == TICKETS_CHANNEL:
+                    return ch["id"]
+            cursor = (result.get("response_metadata") or {}).get("next_cursor")
+            if not cursor:
+                break
         result = slack_client.conversations_create(name=TICKETS_CHANNEL)
         channel_id = result["channel"]["id"]
         slack_client.chat_postMessage(
@@ -1711,14 +1751,23 @@ def _get_or_create_engineer_channel(slack_client, engineer_slack_id: str, engine
         safe_name    = engineer_name.lower().replace(" ", "-").replace("_", "-")[:15]
         channel_name = f"eng-{safe_name}"
 
-        result = slack_client.conversations_list(types="private_channel")
-        for ch in result.get("channels", []):
-            if ch["name"] == channel_name:
-                try:
-                    slack_client.conversations_invite(channel=ch["id"], users=engineer_slack_id)
-                except Exception:
-                    pass
-                return ch["id"]
+        # Fetch all pages of private channels
+        cursor = None
+        while True:
+            kwargs = {"types": "private_channel", "limit": 200}
+            if cursor:
+                kwargs["cursor"] = cursor
+            result = slack_client.conversations_list(**kwargs)
+            for ch in result.get("channels", []):
+                if ch["name"] == channel_name:
+                    try:
+                        slack_client.conversations_invite(channel=ch["id"], users=engineer_slack_id)
+                    except Exception:
+                        pass
+                    return ch["id"]
+            cursor = (result.get("response_metadata") or {}).get("next_cursor")
+            if not cursor:
+                break
 
         result     = slack_client.conversations_create(name=channel_name, is_private=True)
         channel_id = result["channel"]["id"]
@@ -1771,7 +1820,7 @@ def _upload_screenshot(slack_client, channel_id: str, screenshot_path: str, tick
         # Step 2 — upload bytes to the URL
         import requests as _req
         with open(screenshot_path, "rb") as f:
-            up = _req.post(upload_url, files={"file": (filename, f, "image/png")})
+            up = _req.post(upload_url, files={"file": (filename, f, "image/png")}, timeout=30)
         if up.status_code != 200:
             logger.error(f"[Screenshot] upload POST failed: {up.status_code} {up.text[:200]}")
             return
@@ -1783,18 +1832,26 @@ def _upload_screenshot(slack_client, channel_id: str, screenshot_path: str, tick
             initial_comment  = f"Screenshot submitted with ticket {ticket_number}",
         )
         if complete_resp.get("ok"):
-            logger.info(f"[Screenshot] Uploaded {filename} to channel {channel_id} for {ticket_number}")
-            print(f"  [Screenshot] Upload success for {ticket_number}")
+            logger.info("[Screenshot] Uploaded %s to channel %s for %s", filename, channel_id, ticket_number)
         else:
-            logger.error(f"[Screenshot] completeUpload failed: {complete_resp}")
+            logger.error("[Screenshot] completeUpload failed: %s", complete_resp)
 
     except Exception as e:
-        logger.error(f"[Screenshot] Upload error: {e}")
-        print(f"  [Screenshot] Upload error: {e}")
+        logger.error("[Screenshot] Upload error: %s", e)
 
 
-def _post_ticket_to_channel(slack_client, ticket_number, user_name, priority, incident_report, user_slack_id, engineer_slack_id=None, engineer_name=None, screenshot_path=None):
+def _post_ticket_to_channel(slack_client, ticket_number, user_name, priority, incident_report,
+                            user_slack_id, engineer_slack_id=None, engineer_name=None,
+                            screenshot_path=None, user_email=None, user_timezone=None):
     """Post new ticket to engineer private channel and #network-tickets."""
+    contact_block = ""
+    if user_email:
+        contact_block += f"*User Email:* {user_email}\n"
+    if user_timezone and user_timezone not in ("UTC", "Slack", "Remote"):
+        contact_block += f"*User Timezone:* {user_timezone}\n"
+    if contact_block:
+        contact_block = contact_block.rstrip("\n") + "\n\n"
+
     if engineer_slack_id and engineer_name:
         try:
             eng_channel = _get_or_create_engineer_channel(slack_client, engineer_slack_id, engineer_name)
@@ -1802,6 +1859,7 @@ def _post_ticket_to_channel(slack_client, ticket_number, user_name, priority, in
                 msg = (
                     f":ticket: *New Ticket: {ticket_number}*\n\n"
                     f"*Reported by:* {user_name}\n"
+                    f"{contact_block}"
                     f"*Priority:* {priority.upper()}\n"
                     f"*Domain:* Networking\n\n"
                     f"*Incident Report:*\n{incident_report}\n\n"
@@ -1812,7 +1870,6 @@ def _post_ticket_to_channel(slack_client, ticket_number, user_name, priority, in
                     f"`status {ticket_number}` — Show details"
                 )
                 slack_client.chat_postMessage(channel=eng_channel, text=msg, mrkdwn=True)
-                # Upload screenshot if available
                 if screenshot_path and os.path.exists(screenshot_path):
                     _upload_screenshot(slack_client, eng_channel, screenshot_path, ticket_number)
                 logger.info(f"Ticket {ticket_number} posted to engineer channel for {engineer_name}")
@@ -1826,6 +1883,7 @@ def _post_ticket_to_channel(slack_client, ticket_number, user_name, priority, in
         msg = (
             f":ticket: *New Ticket: {ticket_number}*\n\n"
             f"*Reported by:* {user_name}\n"
+            f"{contact_block}"
             f"*Priority:* {priority.upper()}\n"
             f"*Domain:* Networking\n"
             f"*Assigned to:* {engineer_name or 'Unassigned'}\n\n"
@@ -1869,23 +1927,88 @@ def _handle_engineer_command(message: str, slack_user_id: str, user_name: str, s
             say(f"Ticket {tnum} not found.")
             return True
         mention  = parts[2].strip()
-        eng_name = mention.lstrip("@")
         try:
-            result  = slack_client.users_list()
-            members = result.get("members", [])
-            target  = next(
-                (m for m in members
-                 if m.get("profile", {}).get("display_name", "").lower() == eng_name.lower()
-                 or m.get("name", "").lower() == eng_name.lower()),
-                None
-            )
+            import re as _re
+            # Slack converts @mention to <@USERID> or <@USERID|name> in message payload
+            _slack_id_match = _re.match(r'<@([A-Z0-9]+)(?:\|[^>]*)?>', mention, _re.IGNORECASE)
+
+            # Fetch all pages
+            members = []
+            cursor  = None
+            while True:
+                kwargs = {"limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                result  = slack_client.users_list(**kwargs)
+                members.extend(result.get("members", []))
+                cursor = (result.get("response_metadata") or {}).get("next_cursor")
+                if not cursor:
+                    break
+
+            if _slack_id_match:
+                # Direct ID lookup — most reliable
+                eng_user_id = _slack_id_match.group(1).upper()
+                target = next((m for m in members if m["id"] == eng_user_id), None)
+            else:
+                # Plain text name fallback (e.g. typed without @mention autocomplete)
+                eng_name = mention.lstrip("@").lower()
+                def _matches(m):
+                    p = m.get("profile", {})
+                    return (
+                        (p.get("display_name", "").lower()            == eng_name) or
+                        (p.get("display_name_normalized", "").lower() == eng_name) or
+                        (m.get("name", "").lower()                    == eng_name) or
+                        (p.get("real_name", "").lower()               == eng_name)
+                    )
+                target = next((m for m in members if not m.get("is_bot") and _matches(m)), None)
             if target:
-                eng_slack_id = target["id"]
-                slack_client.chat_postMessage(
-                    channel=eng_slack_id,
-                    text=f"Ticket *{tnum}* has been assigned to you by {user_name}.",
-                    mrkdwn=True,
-                )
+                eng_slack_id  = target["id"]
+                new_eng_name  = target.get("profile", {}).get("real_name") or target.get("name", eng_name)
+                target_email  = target.get("profile", {}).get("email", "")
+                from app.models.user import User as _User
+                target_db_user = db.query(_User).filter(_User.email == target_email).first() if target_email else None
+                if target_db_user:
+                    ticket.engineer_id = target_db_user.id
+                    db.commit()
+
+                # Post full ticket to new engineer's private channel
+                try:
+                    eng_channel = _get_or_create_engineer_channel(slack_client, eng_slack_id, new_eng_name)
+                    if eng_channel:
+                        from app.models.user import User as _U
+                        ticket_user = db.query(_U).filter(_U.id == ticket.user_id).first()
+                        contact_block = ""
+                        if ticket_user and ticket_user.email:
+                            contact_block += f"*User Email:* {ticket_user.email}\n"
+                        if ticket_user and ticket_user.timezone and ticket_user.timezone not in ("UTC", "Slack", "Remote"):
+                            contact_block += f"*User Timezone:* {ticket_user.timezone}\n"
+                        if contact_block:
+                            contact_block += "\n"
+                        reporter = ticket_user.full_name if ticket_user else "Unknown"
+                        msg = (
+                            f":ticket: *Ticket Reassigned to You: {tnum}*\n"
+                            f"_Reassigned by {user_name}_\n\n"
+                            f"*Reported by:* {reporter}\n"
+                            f"{contact_block}"
+                            f"*Priority:* {ticket.priority.value.upper()}\n"
+                            f"*Domain:* Networking\n\n"
+                            f"*Diagnosis:*\n{ticket.ai_diagnosis[:600] if ticket.ai_diagnosis else 'See conversation history.'}\n\n"
+                            f"*Commands:*\n"
+                            f"`resolved {tnum}` — Close and notify user\n"
+                            f"`assign {tnum} @engineer` — Reassign again\n"
+                            f"`comment {tnum} <text>` — Send update to user\n"
+                            f"`status {tnum}` — Show details"
+                        )
+                        slack_client.chat_postMessage(channel=eng_channel, text=msg, mrkdwn=True)
+                except Exception as e:
+                    logger.error(f"Failed to post reassignment to engineer channel: {e}")
+                    # Fallback to DM
+                    slack_client.chat_postMessage(
+                        channel=eng_slack_id,
+                        text=f"Ticket *{tnum}* has been assigned to you by {user_name}.",
+                        mrkdwn=True,
+                    )
+
                 say(f"Ticket *{tnum}* reassigned to {mention}.")
             else:
                 say(f"Engineer {mention} not found in workspace.")
@@ -1935,8 +2058,12 @@ def _handle_engineer_command(message: str, slack_user_id: str, user_name: str, s
             f"*Priority:* {ticket.priority.value.upper()}\n"
             f"*Domain:* Networking\n"
             f"*Reported by:* {user_display}\n"
-            f"*Created:* {ticket.created_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
         )
+        if ticket_user and ticket_user.email:
+            status_msg += f"*User Email:* {ticket_user.email}\n"
+        if ticket_user and ticket_user.timezone and ticket_user.timezone not in ("UTC", "Slack", "Remote"):
+            status_msg += f"*User Timezone:* {ticket_user.timezone}\n"
+        status_msg += f"*Created:* {ticket.created_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
         if ticket.resolved_at:
             status_msg += f"*Resolved:* {ticket.resolved_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
         if ticket.ai_diagnosis:
@@ -2004,9 +2131,13 @@ def process_slack_message(
 
     try:
         msg_lower = message.lower().strip()
+        logger.info(f"[SlackMsg] user={slack_user_id} channel={channel} msg={message!r}")
 
         # ── Engineer commands ─────────────────────────────────────────────────
-        if any(msg_lower.startswith(cmd) for cmd in ["resolved ", "assign ", "comment ", "status ", "snooze "]):
+        # Match on first word so spacing/formatting variations don't break routing
+        _first_word = msg_lower.split()[0] if msg_lower.split() else ""
+        if _first_word in ("resolved", "assign", "comment", "status", "snooze"):
+            logger.info(f"[EngineerCmd] user={slack_user_id} channel={channel} msg={message!r}")
             handled = _handle_engineer_command(message, slack_user_id, user_name, slack_client, say, db)
             if handled:
                 return
@@ -2052,10 +2183,7 @@ def process_slack_message(
 
             # Claude interprets yes/no from free-form reply
             try:
-                from app.core.config import settings as _s
-                import anthropic as _a
-                _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
-                resp = _cl.messages.create(
+                resp = _get_cl().messages.create(
                     model      = "claude-sonnet-4-5",
                     max_tokens = 5,
                     messages   = [{"role": "user", "content": (
@@ -2080,7 +2208,8 @@ def process_slack_message(
                     session       = session,
                 )
             else:
-                say("No problem. Let me know if you need anything else or want to continue troubleshooting.")
+                say("I have exhausted all troubleshooting steps available to me. If the issue persists, please start a new conversation to raise a ticket.")
+                _reset_session(slack_user_id)
             return
 
         # ── Screenshot confirmation ───────────────────────────────────────────
@@ -2089,10 +2218,7 @@ def process_slack_message(
         session = chat_service._get_session(session_id)
         if session.get("flow_step") == "waiting_screenshot_confirm" and "[image uploaded]" not in msg_lower:
             try:
-                from app.core.config import settings as _s
-                import anthropic as _a
-                _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
-                resp = _cl.messages.create(
+                resp = _get_cl().messages.create(
                     model      = "claude-sonnet-4-5",
                     max_tokens = 5,
                     messages   = [{"role": "user", "content": (
@@ -2167,10 +2293,7 @@ def process_slack_message(
                 # Store analysis and pre-fetch RAG so it's ready when user confirms
                 session["problem"] = analysis[:400]
                 try:
-                    from app.core.config import settings as _s
-                    import anthropic as _a
-                    _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
-                    q_resp = _cl.messages.create(
+                    q_resp = _get_cl().messages.create(
                         model      = "claude-sonnet-4-5",
                         max_tokens = 30,
                         messages   = [{"role": "user", "content": (
@@ -2222,9 +2345,26 @@ def process_slack_message(
                 if next_step:
                     say(next_step)
                 if hasattr(response, "can_escalate") and response.can_escalate:
-                    _pending_ticket_confirm[slack_user_id] = True
-                    from app.services import slack_blocks as blocks
-                    _say_blocks(say, blocks.ticket_confirm)
+                    _ss_session   = chat_service._get_session(session_id)
+                    _ss_origin    = _ss_session.get("flow_origin", "broken")
+                    _ss_confirmed = _ss_session.get("user_confirmed_ticket", False)
+                    _ss_auto_res  = _ss_session.get("auto_resolved", False)
+                    if _ss_auto_res:
+                        _auto_escalate_resolved(
+                            session_id=session_id, slack_user_id=slack_user_id,
+                            user_name=user_name, user_email=user_email,
+                            db=db, session=_ss_session,
+                        )
+                    elif _ss_confirmed or _ss_origin == "major_incident":
+                        _auto_escalate(
+                            session_id=session_id, slack_user_id=slack_user_id,
+                            user_name=user_name, user_email=user_email,
+                            channel=channel, slack_client=slack_client,
+                            say=say, db=db, session=_ss_session,
+                        )
+                    else:
+                        _pending_ticket_confirm[slack_user_id] = True
+                        _say_blocks(say, blocks.ticket_confirm)
             else:
                 # Any other step — just show the analysis, store context
                 session["is_screenshot_turn"] = True
@@ -2268,12 +2408,12 @@ def process_slack_message(
             _say_reply(say, reply, blocks)
 
         if hasattr(response, "can_escalate") and response.can_escalate:
-            flow_origin  = session.get("flow_origin", "broken")
+            flow_origin   = session.get("flow_origin", "broken")
             auto_resolved = session.get("auto_resolved", False)
+            user_confirmed = session.get("user_confirmed_ticket", False)
 
             if auto_resolved:
                 # Issue resolved by AI — silently raise ticket and mark resolved
-                # No message to user, no confirmation prompt
                 _auto_escalate_resolved(
                     session_id    = session_id,
                     slack_user_id = slack_user_id,
@@ -2294,8 +2434,22 @@ def process_slack_message(
                     db            = db,
                     session       = session,
                 )
+            elif user_confirmed or flow_origin == "major_incident":
+                # User already confirmed (clicked "Raise Ticket" at mid-check) or
+                # major incident — raise immediately, no second confirmation
+                _auto_escalate(
+                    session_id    = session_id,
+                    slack_user_id = slack_user_id,
+                    user_name     = user_name,
+                    user_email    = user_email,
+                    channel       = channel,
+                    slack_client  = slack_client,
+                    say           = say,
+                    db            = db,
+                    session       = session,
+                )
             else:
-                # Broken / major incident — ask user first
+                # Steps exhausted — ask user to confirm before raising
                 _pending_ticket_confirm[slack_user_id] = True
                 _say_blocks(say, blocks.ticket_confirm)
 
@@ -2328,8 +2482,17 @@ def _auto_escalate_resolved(session_id, slack_user_id, user_name, user_email, db
 
         messages  = session.get("messages", [])
         user_msgs = [m["content"] for m in messages if m["role"] == "user"]
-        title     = user_msgs[0][:80] if user_msgs else "IT Support Issue"
         severity  = session.get("severity", "medium") or "medium"
+
+        _flow_triggers = {"broken", "consult", "planning", "yes", "no", "y", "n",
+                          "not working", "outage", "help", "urgent", "major incident"}
+        _problem = session.get("problem", "").strip()
+        if not _problem:
+            _problem = next(
+                (m for m in user_msgs if m.strip().lower() not in _flow_triggers and len(m.strip()) > 10),
+                user_msgs[0] if user_msgs else ""
+            )
+        title = _problem[:80] if _problem else "IT Support Issue"
 
         req = EscalateReq(
             session_id  = session_id,
@@ -2373,7 +2536,7 @@ def _auto_escalate_resolved(session_id, slack_user_id, user_name, user_email, db
                 ticket.status      = TicketStatus.RESOLVED
                 ticket.resolved_at = datetime.utcnow()
                 db.commit()
-                print(f"  [AutoResolve] Ticket {ticket_result.ticket_number} raised and marked resolved (AI resolved)")
+                logger.info("[AutoResolve] Ticket %s raised and marked resolved (AI resolved)", ticket_result.ticket_number)
 
         _reset_session(slack_user_id)
 
@@ -2397,9 +2560,19 @@ def _auto_escalate(session_id, slack_user_id, user_name, user_email, channel, sl
 
         messages  = session.get("messages", [])
         user_msgs = [m["content"] for m in messages if m["role"] == "user"]
-        title     = user_msgs[0][:80] if user_msgs else "IT Support Issue"
         severity  = session.get("severity", "medium") or "medium"
         diagnosis = session.get("asset_context", {}).get("diagnosis", "")
+
+        # Use session problem description; fall back to first substantive user message
+        _flow_triggers = {"broken", "consult", "planning", "yes", "no", "y", "n",
+                          "not working", "outage", "help", "urgent", "major incident"}
+        _problem = session.get("problem", "").strip()
+        if not _problem:
+            _problem = next(
+                (m for m in user_msgs if m.strip().lower() not in _flow_triggers and len(m.strip()) > 10),
+                user_msgs[0] if user_msgs else ""
+            )
+        title = _problem[:80] if _problem else "IT Support Issue"
 
         req = EscalateReq(
             session_id  = session_id,
@@ -2414,6 +2587,19 @@ def _auto_escalate(session_id, slack_user_id, user_name, user_email, channel, sl
         from app.core.security import hash_password
         import uuid as _uuid
 
+        # Fetch real timezone/location from Slack profile
+        user_tz = "UTC"
+        user_city = "Remote"
+        try:
+            slack_info = slack_client.users_info(user=slack_user_id)
+            if slack_info and slack_info.get("user"):
+                slack_profile = slack_info["user"]
+                user_tz = slack_profile.get("tz") or "UTC"
+                tz_label = slack_profile.get("tz_label", "")
+                user_city = tz_label if tz_label else user_tz
+        except Exception as e:
+            logger.warning(f"Could not fetch Slack timezone for {slack_user_id}: {e}")
+
         slack_db_user = db.query(User).filter(User.email == user_email).first()
         if not slack_db_user:
             slack_db_user = User(
@@ -2424,12 +2610,15 @@ def _auto_escalate(session_id, slack_user_id, user_name, user_email, channel, sl
                 role            = UserRole.USER,
                 is_active       = True,
                 is_verified     = True,
-                city            = "Slack",
+                city            = user_city,
                 country         = "Remote",
-                timezone        = "UTC",
+                timezone        = user_tz,
             )
             db.add(slack_db_user)
             db.flush()
+        else:
+            slack_db_user.timezone = user_tz
+            slack_db_user.city = user_city
 
         is_consult  = session.get("flow_origin") == "consult"
         is_planning = session.get("flow_origin") == "planning"
@@ -2456,10 +2645,7 @@ def _auto_escalate(session_id, slack_user_id, user_name, user_email, channel, sl
             return
 
         # Generate AI incident report — include screenshot analysis if available
-        from app.core.config import settings as _settings
-        import anthropic as _anthropic
-        _cl = _anthropic.Anthropic(api_key=_settings.ANTHROPIC_API_KEY)
-
+        _acl  = _get_cl()
         msgs  = session.get("messages", [])
         convo = "\n".join(
             ("User: " if m["role"] == "user" else "Bot: ") + m["content"]
@@ -2470,7 +2656,7 @@ def _auto_escalate(session_id, slack_user_id, user_name, user_email, channel, sl
             convo += f"\n\nScreenshot Analysis:\n{session['screenshot_analysis']}"
 
         try:
-            resp = _cl.messages.create(
+            resp = _acl.messages.create(
                 model      = "claude-sonnet-4-5",
                 max_tokens = 1000,
                 messages   = [{"role": "user", "content": (
@@ -2493,6 +2679,19 @@ def _auto_escalate(session_id, slack_user_id, user_name, user_email, channel, sl
             incident_report = resp.content[0].text.strip()
         except Exception:
             incident_report = diagnosis or title
+
+        # Persist incident report as ai_diagnosis on the ticket
+        try:
+            from app.core.database import SessionLocal as _SL
+            _db2 = _SL()
+            from app.models.ticket import Ticket as _T
+            _t = _db2.query(_T).filter(_T.ticket_number == ticket_result.ticket_number).first()
+            if _t:
+                _t.ai_diagnosis = incident_report
+                _db2.commit()
+            _db2.close()
+        except Exception as _e:
+            logger.warning(f"Could not persist ai_diagnosis: {_e}")
 
         # Routing — asset owner first, then fallback
         slack_eng     = None
@@ -2575,8 +2774,10 @@ def _auto_escalate(session_id, slack_user_id, user_name, user_email, channel, sl
             engineer_slack_id = slack_eng["slack_id"] if slack_eng else None,
             engineer_name     = slack_eng["name"] if slack_eng else None,
             screenshot_path   = session.get("screenshot_path"),
+            user_email        = user_email,
+            user_timezone     = user_tz,
         )
-        print(f"  [Screenshot] path at escalation: {session.get('screenshot_path')}")
+        logger.debug("[Screenshot] path at escalation present=%s", bool(session.get("screenshot_path")))
 
         if slack_eng:
             try:

@@ -28,6 +28,11 @@ import pytz
 import os
 import anthropic
 
+import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 from app.core.config import settings
 from app.models.user import User
 from app.models.ticket import Ticket, TicketStatus, TicketPriority, TicketDomain
@@ -38,8 +43,116 @@ from app.schemas.chat import (
     EscalateRequest, EscalateResponse, UserTicketResponse,
 )
 
+logger = logging.getLogger(__name__)
+
 _client    = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+_SESSION_MAX_SIZE  = 5_000
+_SESSION_TTL_SECS  = 7_200   # 2 hours
+_SESSION_REDIS_TTL = 7_500   # slightly longer than memory TTL
+_MSG_CAP           = 100     # max messages kept per session (sliding window)
+
 _sessions: dict = {}
+_sessions_lock  = threading.Lock()
+
+# Bounded pool for fire-and-forget Redis session writes.
+# 16 workers × ~10ms Upstash RTT ≈ 1,600 writes/s throughput —
+# enough headroom for 500 concurrent users without blocking process_message.
+_redis_write_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="redis-save")
+
+
+def _get_redis():
+    """Return sync Redis client or None (never raises)."""
+    try:
+        from app.core.redis_client import get_sync_redis
+        return get_sync_redis()
+    except Exception:
+        return None
+
+
+def _save_session(sid: str, session: dict) -> None:
+    """Fire-and-forget Redis session persist. Returns immediately; write happens in background."""
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        import json as _json
+        data = _json.dumps(session, default=str)
+    except Exception:
+        return
+    # Serialize on the calling thread (session is still in scope / stable),
+    # then hand the actual network write to the pool so process_message is not blocked.
+    def _write():
+        try:
+            r.setex(f"session:{sid}", _SESSION_REDIS_TTL, data)
+        except Exception as _e:
+            logger.debug("[Session] Redis async save failed for %s: %s", sid, _e)
+    try:
+        _redis_write_pool.submit(_write)
+    except RuntimeError:
+        pass  # pool shut down (test teardown) — ignore
+
+
+def _delete_session_redis(sid: str) -> None:
+    """Remove session from Redis (called on ticket escalation). Silent no-op on failure."""
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        r.delete(f"session:{sid}")
+    except Exception:
+        pass
+
+# Serialises ticket number generation + DB commit to prevent duplicates under concurrency
+_ticket_creation_lock = threading.Lock()
+
+
+def _evict_old_sessions() -> None:
+    # Called inside _sessions_lock — do NOT acquire lock here.
+    if len(_sessions) < _SESSION_MAX_SIZE:
+        return
+    now   = datetime.utcnow().timestamp()
+    # Snapshot keys to avoid dict-changed-during-iteration
+    stale = [sid for sid, s in list(_sessions.items())
+             if now - s.get("_last_accessed", now) > _SESSION_TTL_SECS]
+    for sid in stale:
+        _sessions.pop(sid, None)
+    if len(_sessions) >= _SESSION_MAX_SIZE:
+        snapshot = list(_sessions.items())
+        oldest   = sorted(snapshot, key=lambda kv: kv[1].get("_last_accessed", 0))
+        for sid, _ in oldest[:max(1, len(_sessions) // 10)]:
+            _sessions.pop(sid, None)
+
+
+def _sweep_expired_sessions() -> None:
+    """Proactive sweeper — removes all sessions idle > _SESSION_TTL_SECS.
+    Runs independently of _SESSION_MAX_SIZE so memory is reclaimed on schedule."""
+    now = datetime.utcnow().timestamp()
+    with _sessions_lock:
+        stale = [sid for sid, s in list(_sessions.items())
+                 if now - s.get("_last_accessed", now) > _SESSION_TTL_SECS]
+        for sid in stale:
+            _sessions.pop(sid, None)
+    if stale:
+        logger.info("[Session] Swept %d expired session(s) (idle > %ds)", len(stale), _SESSION_TTL_SECS)
+
+
+def _start_session_sweeper(interval_secs: int = 900) -> None:
+    """Start a daemon thread that calls _sweep_expired_sessions every interval_secs."""
+    def _run() -> None:
+        while True:
+            time.sleep(interval_secs)
+            try:
+                _sweep_expired_sessions()
+            except Exception:
+                pass  # never let the sweeper crash the process
+
+    t = threading.Thread(target=_run, daemon=True, name="session-sweeper")
+    t.start()
+    logger.info("[Session] Sweeper started — interval=%ds TTL=%ds", interval_secs, _SESSION_TTL_SECS)
+
+
+_start_session_sweeper()
 
 SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "screenshots")
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
@@ -64,38 +177,15 @@ STRICT FORMATTING:
 - Never start with "Certainly", "Absolutely", "Of course", "Great".
 
 KNOWLEDGE BASE PRIORITY:
-- If knowledge base content is provided → read it fully and follow the most relevant procedure.
-- If no knowledge base content is relevant → use your own networking expertise.
-- Always try to solve the issue.
+- If knowledge base content is provided → read it fully and follow the most relevant procedure step by step.
+- If no knowledge base content is relevant → use your own networking expertise to troubleshoot.
+- Always try to solve the issue before suggesting escalation.
 
-SCOPE: Handle ALL networking issues yourself — DNS, BGP, OSPF, EIGRP, MPLS, VPN, firewall, routing, switching, Netskope, VLAN, SD-WAN, wireless, peering, AS numbers, routing protocols, network security. NEVER tell the user to contact a BGP specialist, routing team, or network engineering team mid-conversation. If you cannot solve it yourself, exhaust all troubleshooting steps first, then escalate via ticket. Only redirect away if the issue is clearly not networking at all (e.g. printer driver, HR software, payroll system, laptop screen broken).
+SCOPE: Handle ALL networking issues yourself — DNS, BGP, OSPF, EIGRP, MPLS, VPN, firewall, routing, switching, Netskope, VLAN, SD-WAN, wireless, peering, AS numbers, routing protocols, network security. NEVER tell the user to contact a specialist or team mid-conversation. Exhaust all troubleshooting steps first, then escalate via ticket. Only redirect away if the issue is clearly not networking at all (e.g. printer driver, HR software, payroll system, broken hardware).
 
-DNS / NETSKOPE DETECTION — CRITICAL:
-Whenever conversation contains ANY of these signals:
-- "site can't be reached", "this site can't be reached"
-- "ERR_NAME_NOT_RESOLVED", "cannot resolve host", "could not find host"
-- "connection error" for a specific URL or application
-- Any specific URL or domain name that is not accessible
-- "cannot access" any specific application or URL
+PLACEHOLDERS: Never show any placeholder in commands. Before writing any command, scan the entire conversation for known values (IP addresses, hostnames, URLs, AS numbers, interface names, router-ids, peer IPs, group names) and substitute them directly. If a value is not yet known, ask the user for that specific value first — in the same message, before showing any command. Never show angle-bracket tokens like <hostname>, <url>, <ip>, <internal-portal-url>, or any similar placeholder to the user. Never invent or guess a value.
 
-IMMEDIATELY run this DNS check flow:
-Step 1: If you do NOT already have the exact domain or URL from the conversation, ask for it.
-  Ask: "What is the exact URL or domain name you are trying to access?"
-  Never give a command with a placeholder. Only proceed once you have the real domain.
-Step 2: Ask the user to run the DNS check using the REAL domain substituted in:
-  Mac/Linux: host real-domain.example.com
-  Windows: nslookup real-domain.example.com
-Step 3: Analyse result:
-  - IP starts with 191.x.x.x → Netskope routing correct, check app layer
-  - Any other IP (103.x, 52.x, 142.x etc.) → Netskope routing issue. Ask user to disconnect and reconnect Netskope, then run DNS check again.
-  - NXDOMAIN or cannot resolve → DNS zone issue, check BIND9 and zone files
-Step 4: If IP is still wrong after reconnect → ask user to flush DNS cache:
-  Mac: sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder
-  Windows: ipconfig /flushdns
-  Then run DNS check again.
-Step 5: If IP is still wrong after flush → tell user this domain is not in the Netskope steering policy and must be added by the network team. Do not ask for the URL again — you already have it. End with [STEPS_EXHAUSTED].
-
-PLACEHOLDERS: Never show any placeholder in commands. Before writing any command, scan the entire conversation for known values (IP addresses, hostnames, AS numbers, interface names, router-ids, peer IPs, group names) and substitute them directly. Examples of forbidden placeholders: <destination-ip>, <remote-peer-ip>, <hostname>, <group-name>, <interface>, <as-number>, <your-portal-url>. If a value is not yet known, ask for it first. Never show a placeholder to the user.
+NO ACTIONS: You can only give steps. You have no access to any system — you cannot add, configure, update, restart, modify, or action anything. You cannot touch Netskope, firewalls, DNS servers, routers, switches, or any admin tool. Never use phrases like "I am adding", "I am configuring", "I have done this", "I will update". If a fix requires someone with admin access (e.g. adding a domain to Netskope steering policy), tell the user exactly what needs to be done and by whom. CRITICAL: Never say anything like "Would you like me to raise a ticket", "Should I escalate this", "I have gathered enough information", "I'll raise a support ticket", or any phrase suggesting ticket creation or escalation — the support system handles this automatically and will prompt the user when the time comes. Simply keep giving the next troubleshooting step until you run out of steps, then stop and wait.
 
 COMMANDS: Always show Mac/Linux AND Windows versions for every command.
 
@@ -127,33 +217,57 @@ Always end with: <meta>{{"domain":"networking","severity":"{severity}","is_netwo
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_session(sid: str) -> dict:
-    if sid not in _sessions:
-        _sessions[sid] = {
-            "messages":           [],
-            "flow_step":          "broken",
-            "domain":             "networking",
-            "severity":           "medium",
-            "problem":            "",
-            "rag_context":        "",
-            "solve_attempts":     0,
-            "is_networking":      True,
-            "triage_active":      False,
-            "triage_questions":   [],
-            "triage_q_index":     0,
-            "triage_answers":     [],
-            "triage_filters":     {},
-            "triage_rows":        [],
-            "asset_match":        None,
-            "asset_confirmed":    False,
-            "asset_context":      {},
-            "triage_started":     False,
-            "mid_check_done":     False,
-            "flow_origin":        "broken",
-            # Screenshot state
-            "screenshot_analysis": None,   # filled when user sends image
-            "is_screenshot_turn":  False,  # True for the one turn after image arrives
-        }
-    return _sessions[sid]
+    # Fast path: session already in local cache — hold lock only for microseconds.
+    with _sessions_lock:
+        if sid in _sessions:
+            _sessions[sid]["_last_accessed"] = datetime.utcnow().timestamp()
+            return _sessions[sid]
+
+    # Cache miss: probe Redis WITHOUT holding the global lock so concurrent
+    # threads don't serialize through the ~10 ms Upstash round-trip.
+    restored = None
+    r = _get_redis()
+    if r is not None:
+        try:
+            import json as _json
+            raw = r.get(f"session:{sid}")
+            if raw:
+                restored = _json.loads(raw)
+                logger.debug("[Session] Restored from Redis: %s", sid)
+        except Exception as _e:
+            logger.debug("[Session] Redis restore failed for %s: %s", sid, _e)
+
+    # Re-acquire lock to write — double-check in case another thread populated
+    # the same session while we were waiting for the Redis response.
+    with _sessions_lock:
+        if sid not in _sessions:
+            _evict_old_sessions()
+            _sessions[sid] = restored if restored is not None else {
+                "messages":           [],
+                "flow_step":          "broken",
+                "domain":             "networking",
+                "severity":           "medium",
+                "problem":            "",
+                "rag_context":        "",
+                "solve_attempts":     0,
+                "is_networking":      True,
+                "triage_active":      False,
+                "triage_questions":   [],
+                "triage_q_index":     0,
+                "triage_answers":     [],
+                "triage_filters":     {},
+                "triage_rows":        [],
+                "asset_match":        None,
+                "asset_confirmed":    False,
+                "asset_context":      {},
+                "triage_started":     False,
+                "mid_check_done":     False,
+                "flow_origin":        "broken",
+                "screenshot_analysis": None,
+                "is_screenshot_turn":  False,
+            }
+        _sessions[sid]["_last_accessed"] = datetime.utcnow().timestamp()
+        return _sessions[sid]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -173,12 +287,25 @@ def _call_claude(session: dict, system: str, extra_hint: str = "", trim_for_cons
     if trim_for_consult and len(messages) > 4:
         messages = messages[-4:]
 
-    resp = _client.messages.create(
-        model      = "claude-sonnet-4-5",
-        max_tokens = 400,
-        system     = system,
-        messages   = messages,
-    )
+    last_exc = None
+    for _attempt in range(3):
+        try:
+            resp = _client.messages.create(
+                model      = "claude-sonnet-4-5",
+                max_tokens = 400,
+                system     = system,
+                messages   = messages,
+            )
+            break
+        except Exception as _exc:
+            last_exc = _exc
+            _s = str(_exc).lower()
+            if _attempt < 2 and any(x in _s for x in ["rate_limit", "overloaded", "529", "500", "503", "timeout"]):
+                time.sleep(1.5 ** _attempt)
+                continue
+            raise
+    else:
+        raise last_exc
     raw = resp.content[0].text.strip()
 
     domain        = "networking"
@@ -212,13 +339,12 @@ def _call_claude(session: dict, system: str, extra_hint: str = "", trim_for_cons
 
 def _should_count_attempt(reply: str, is_screenshot_turn: bool) -> bool:
     """
-    Ask Claude whether this reply contains a real diagnostic action
-    (command to run, service to restart, config change) as opposed to
-    a visual/UI navigation step or informational question.
+    Count as a troubleshooting attempt only when the bot gives an actual
+    troubleshooting step — anything that tells the user to DO something.
+    Replies that are purely information-gathering questions do NOT count.
 
     Screenshot turns NEVER count regardless of reply content.
     """
-    # Screenshot turn → never count
     if is_screenshot_turn:
         return False
 
@@ -227,23 +353,25 @@ def _should_count_attempt(reply: str, is_screenshot_turn: bool) -> bool:
             model      = "claude-sonnet-4-5",
             max_tokens = 5,
             messages   = [{"role": "user", "content": (
-                "Does the following IT support reply ask the user to run a real diagnostic "
-                "command, restart a service, flush a cache, or make a config change?\n\n"
-                "Reply YES only if the reply contains an actual command to execute "
-                "(e.g. ping, nslookup, traceroute, ipconfig /flushdns, systemctl restart, "
-                "show ip bgp summary, configure terminal, disconnect/reconnect a service).\n\n"
-                "Reply NO if the reply:\n"
-                "- Asks a question to gather information (e.g. 'what AS number?', 'which vendor?', 'what OS?')\n"
-                "- Gives navigation instructions (click, open settings, go to)\n"
-                "- Explains or describes something\n"
-                "- Confirms a diagnosis without giving a command to run\n"
-                "- Asks the user to confirm something\n\n"
+                "Does the following IT support reply give the user a troubleshooting step to perform?\n\n"
+                "Reply YES if the reply tells the user to DO something — examples:\n"
+                "- Run a command (ping, nslookup, traceroute, ipconfig, etc.)\n"
+                "- Check, open, navigate to, or look at a setting or page\n"
+                "- Enable, disable, install, uninstall, or restart something\n"
+                "- Try reconnecting, clearing, flushing, or resetting something\n"
+                "- Follow a numbered step from a runbook\n\n"
+                "Reply NO if the reply is ONLY asking the user for information — examples:\n"
+                "- 'What OS are you on?'\n"
+                "- 'Are you using Netskope?'\n"
+                "- 'Can you describe what happens?'\n"
+                "- 'What error message do you see?'\n"
+                "- Any question gathering context before troubleshooting starts\n\n"
+                "If the reply contains BOTH a question AND a step, reply YES.\n\n"
                 f"Reply:\n{reply[:600]}"
             )}],
         )
         return "YES" in resp.content[0].text.strip().upper()
     except Exception:
-        # Fail safe — don't count on error
         return False
 
 
@@ -255,8 +383,11 @@ def _get_rag(query: str) -> str:
     """Search knowledge base for relevant runbook content."""
     try:
         from app.services.knowledge_service import get_rag_context
-        return get_rag_context(query, domain="networking", n_results=10)
-    except Exception:
+        result = get_rag_context(query, domain="networking", n_results=10)
+        logger.info("[RAG] _get_rag query=%.80s result_len=%d", query, len(result))
+        return result
+    except Exception as exc:
+        logger.warning("[RAG] _get_rag failed: %s", exc)
         return ""
 
 
@@ -273,10 +404,9 @@ def _ask_broken(session: dict, sid: str) -> ChatMessageResponse:
 
 
 def _handle_broken(session: dict, sid: str, message: str) -> Optional[ChatMessageResponse]:
-    """Handle response to 'is something broken' — use Claude to detect intent."""
+    """Handle response to 'is something broken' — keyword fast-path then Claude fallback."""
     msg = message.lower().strip()
 
-    # Direct consult signals — skip question, go straight to details
     consult_direct = ["consult", "question", "advice", "guidance", "help with", "how do i",
                       "wondering", "planning", "need to know", "asking about"]
     if any(s in msg for s in consult_direct):
@@ -285,7 +415,6 @@ def _handle_broken(session: dict, sid: str, message: str) -> Optional[ChatMessag
         session["messages"].append({"role": "assistant", "content": reply})
         return _make_response(sid, session, reply, can_escalate=False)
 
-    # Direct broken signals
     broken_direct = ["broken", "down", "not working", "outage", "crash", "fail", "error",
                      "can't access", "cannot access", "unreachable", "not responding"]
     if any(s in msg for s in broken_direct):
@@ -294,17 +423,14 @@ def _handle_broken(session: dict, sid: str, message: str) -> Optional[ChatMessag
         session["messages"].append({"role": "assistant", "content": reply})
         return _make_response(sid, session, reply, can_escalate=False)
 
-    # Ambiguous — use Claude to detect intent
     try:
-        from app.core.config import settings as _s
-        import anthropic as _a
-        _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
-        resp = _cl.messages.create(
+        resp = _client.messages.create(
             model      = "claude-sonnet-4-5",
             max_tokens = 10,
             messages   = [{"role": "user", "content": (
-                f"Is this message reporting a broken/urgent IT issue (BROKEN) or asking a question/consult (CONSULT)? "
-                f"Reply only BROKEN or CONSULT.\nMessage: {msg}"
+                "Is this message reporting a broken/urgent IT issue (BROKEN) or asking a question/consult (CONSULT)? "
+                "Reply only BROKEN or CONSULT.\n"
+                f"Message: {msg}"
             )}],
         )
         intent = resp.content[0].text.strip().upper()
@@ -336,6 +462,7 @@ def _handle_impacting(session: dict, sid: str, message: str) -> ChatMessageRespo
         return _make_response(sid, session, reply, can_escalate=False)
     else:
         session["flow_step"] = "waiting_problem"
+        session["customer_impacting"] = False  # not customer-impacting → auto-raise at 4
         reply = "Can you describe what's happening? What exactly is the issue?"
         session["messages"].append({"role": "assistant", "content": reply})
         return _make_response(sid, session, reply, can_escalate=False)
@@ -348,13 +475,14 @@ def _handle_multi_customer(session: dict, sid: str, message: str) -> ChatMessage
                    "all", "everyone", "widespread", "2", "3", "4", "5"]
 
     if any(s in msg for s in yes_signals):
-        session["flow_step"]   = "ai_analysis"
-        session["flow_origin"] = "major_incident"
-        session["severity"]    = "critical"
+        session["flow_step"]      = "ai_analysis"
+        session["flow_origin"]    = "major_incident"
+        session["severity"]       = "critical"
         session["solve_attempts"] = 0
         return _start_ai_analysis(session, sid)
     else:
         session["flow_step"] = "waiting_problem"
+        session["customer_impacting"] = True  # single user, customer-impacting → mid-check at 3
         reply = "Can you describe what's happening? What is the customer experiencing?"
         session["messages"].append({"role": "assistant", "content": reply})
         return _make_response(sid, session, reply, can_escalate=False)
@@ -382,10 +510,7 @@ def _handle_details(session: dict, sid: str, message: str) -> ChatMessageRespons
     session["problem"] = message[:400]
 
     try:
-        from app.core.config import settings as _s
-        import anthropic as _a
-        _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
-        resp = _cl.messages.create(
+        resp = _client.messages.create(
             model      = "claude-sonnet-4-5",
             max_tokens = 10,
             messages   = [{"role": "user", "content": (
@@ -418,11 +543,8 @@ def _handle_deadline(session: dict, sid: str, message: str) -> ChatMessageRespon
     elif msg == "deadline_no":
         has_deadline = False
     else:
-        from app.core.config import settings as _s
-        import anthropic as _a
-        _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
         try:
-            resp = _cl.messages.create(
+            resp = _client.messages.create(
                 model      = "claude-sonnet-4-5",
                 max_tokens = 10,
                 messages   = [{"role": "user", "content": (
@@ -452,9 +574,9 @@ def _handle_deadline(session: dict, sid: str, message: str) -> ChatMessageRespon
 def _handle_help_today(session: dict, sid: str, message: str) -> ChatMessageResponse:
     """Handle 'need help today' question."""
     msg = message.lower().strip()
-    yes_signals = ["yes", "yeah", "today", "now", "urgent", "asap", "immediately"]
+    yes_signals = ["yes", "yeah", "today", "now", "asap", "immediately", "need it now", "right now"]
 
-    if any(s in msg for s in yes_signals):
+    if any(s in msg for s in yes_signals) or (msg == "urgent") or ("urgent" in msg and "not" not in msg):
         session["flow_step"]   = "ai_analysis"
         session["flow_origin"] = "consult"
         return _start_ai_analysis(session, sid)
@@ -479,12 +601,12 @@ def _start_ai_analysis(session: dict, sid: str) -> ChatMessageResponse:
         user_msgs = [m["content"] for m in session["messages"] if m["role"] == "user"]
         problem   = " ".join(user_msgs[:3])
 
-    # Fetch RAG for all flows including consult
     is_consult_or_planning = session.get("flow_origin") in ("consult", "planning")
     rag_context = session.get("rag_context") or _get_rag(problem)
     session["rag_context"] = rag_context
+    logger.info("[RAG] flow_origin=%s rag_found=%s query=%.80s",
+                session.get("flow_origin"), bool(rag_context), problem)
 
-    # Inject screenshot analysis into context if present
     screenshot_ctx = ""
     if session.get("screenshot_analysis"):
         screenshot_ctx = (
@@ -493,6 +615,8 @@ def _start_ai_analysis(session: dict, sid: str) -> ChatMessageResponse:
         )
 
     is_screenshot_turn = session.get("is_screenshot_turn", False)
+    flow_origin        = session.get("flow_origin")
+    n                  = session.get("solve_attempts", 0)
 
     if rag_context:
         system = (
@@ -505,102 +629,107 @@ def _start_ai_analysis(session: dict, sid: str) -> ChatMessageResponse:
             "NETWORKING SCOPE: Handle ALL networking issues yourself — DNS, BGP, OSPF, VPN, firewall, "
             "routing, switching, Netskope, VLAN, MPLS, SD-WAN, wireless, routing protocols, peering. "
             "NEVER tell the user to contact a BGP specialist or routing team mid-conversation. "
-            "Troubleshoot fully, then escalate via ticket if unresolved. "
+            "Exhaust all troubleshooting steps first. NEVER say 'Would you like me to raise a ticket', 'Should I escalate', 'I have gathered enough information', or anything suggesting ticket creation — the system handles escalation automatically. Keep giving the next step until you run out of steps, then stop. "
             "Only redirect if clearly not networking at all (printer driver, HR software, payroll).\n\n"
-            + "KNOWLEDGE BASE: Reference material is provided below for context.\n\n"
+            "PLACEHOLDERS: Never show any placeholder in commands. "
+            "Before writing any command, scan the entire conversation for known values (IP addresses, hostnames, URLs, AS numbers, interface names) and substitute them directly. "
+            "If a value is not yet known, ask the user for that specific value IN THE SAME MESSAGE before showing the command — do not show the command with a placeholder, do not invent a value, do not use angle-bracket tokens like <hostname> or <url> or <internal-portal-url> or similar. "
+            "Ask the question, wait for the answer, then show the command with the real value substituted.\n\n"
+            + "KNOWLEDGE BASE — RUNBOOK PROCEDURES:\n\n"
             + ("" if is_consult_or_planning else
-               "CRITICAL RULE: Read the ENTIRE runbook first. Find the most relevant procedure. "
-               "Execute Step 1 of that procedure RIGHT NOW. "
-               "DO NOT ask questions not in the runbook procedure.\n\n")
+               "RUNBOOK INSTRUCTION: A runbook procedure is provided below. "
+               "First check: does this runbook directly match the user's specific problem? "
+               "If YES — follow Step 1 of that procedure. Address the user directly using 'you', never third-person meta-instructions like 'Ask the user'. "
+               "If NO (e.g. runbook is about Netskope but user has a DHCP/BGP/hardware issue) — ignore the runbook completely and use your own networking expertise for the first diagnostic step.\n\n")
             + f"{rag_context}"
             + f"{screenshot_ctx}\n\n"
-            + ("" if is_consult_or_planning else "Now execute Step 1 of the most relevant procedure. Nothing else.")
+            + ("" if is_consult_or_planning else "Now give Step 1 of the matching procedure. Nothing else.")
         )
-        hint = "Execute Step 1 of the most relevant procedure from the runbook right now."
+        hint = "Give Step 1 of the matching runbook procedure. Address the user directly using 'you' — never say 'Ask the user' or use third-person meta-instructions. Speak as if you are the support agent talking to the user."
 
-        if session.get("flow_origin") == "major_incident":
+        if flow_origin == "major_incident":
             n_mi = session.get("solve_attempts", 0)
-            if n_mi == 0:
+            if n_mi >= 3:
                 hint = (
-                    "This is a MAJOR INCIDENT affecting multiple customers. "
-                    "Ask focused triage questions to understand scope. "
-                    "Ask: How many customers are affected and which services are down?"
+                    "You have enough information. Summarise the incident and tell the user "
+                    "a CRITICAL ticket is being raised now. End with [STEPS_EXHAUSTED]."
                 )
-            elif n_mi == 1:
-                hint = "Ask: What is the current impact level — complete outage, degraded service, or intermittent?"
-            elif n_mi == 2:
-                hint = "Ask: When did this start and were there any recent changes or maintenance?"
             else:
                 hint = (
-                    "You have enough information. "
-                    "Summarise the incident clearly and tell the user a CRITICAL ticket is being raised immediately. "
-                    "End with [STEPS_EXHAUSTED]."
+                    "This is a MAJOR INCIDENT affecting multiple customers. "
+                    + ("Follow the runbook procedure for this incident type." if rag_context else
+                       "Ask the single most important question to understand scope, impact, or recent changes.")
                 )
-        elif session.get("flow_origin") == "consult":
-            remaining = max(0, 6 - session.get("solve_attempts", 0))
+        elif flow_origin == "consult":
+            remaining   = max(0, 6 - n)
             problem_ctx = f"The consultation is about: {session.get('problem', '')}. " if session.get("problem") else ""
             hint = (
                 f"This is a network team consultation. You have {remaining} quality exchanges remaining. "
                 f"{problem_ctx}"
-                f"Your goal is to gather maximum useful technical information for the network engineer who will implement this. "
-                f"Ask ONE focused technical question about the network infrastructure, devices, scale, IP ranges, security requirements, or constraints. "
-                f"Do NOT ask for contact details, email addresses, or non-technical information. "
-                f"Do NOT provide configuration steps, commands, implementation plans, or solutions. "
-                f"Do NOT mention escalation, the network team, or handing off to anyone. "
-                f"Just ask the single most valuable technical question for the engineer."
+                "Ask ONE focused technical question for the network engineer — infrastructure, devices, scale, "
+                "IP ranges, security requirements, or constraints. "
+                "Do NOT provide solutions, commands, or implementation steps. "
+                "Do NOT mention escalation or handing off."
             )
-        elif session.get("flow_origin") == "planning":
+        elif flow_origin == "planning":
             timeline  = session.get("planning_timeline", "future")
-            remaining = max(0, 4 - session.get("solve_attempts", 0))
+            remaining = max(0, 4 - n)
             hint = (
                 f"This request is scheduled for: {timeline}. "
-                f"You have {remaining} exchanges to gather planning context for the network team. "
-                f"Ask ONE focused question about: technical scope, dependencies, blockers, "
-                f"business priority, success criteria, or contact person. "
-                f"Do NOT mention escalation or handing off. Just gather planning information."
+                f"You have {remaining} exchanges to gather planning context. "
+                "Ask ONE focused question about technical scope, dependencies, blockers, "
+                "business priority, or success criteria. Do NOT mention escalation."
             )
     else:
         system = SYSTEM_PROMPT + (f"\n\n{screenshot_ctx}" if screenshot_ctx else "")
-        if session.get("flow_origin") == "consult":
-            remaining = max(0, 6 - session.get("solve_attempts", 0))
+        if flow_origin == "consult":
+            remaining   = max(0, 6 - n)
+            problem_ctx = f"The consultation is about: {session.get('problem', '')}. " if session.get("problem") else ""
             hint = (
                 f"This is a network team consultation. You have {remaining} exchanges remaining. "
-                f"Your goal is to gather maximum useful technical information for the network engineer who will implement this. "
-                f"Ask ONE focused technical question about the network infrastructure, devices, scale, IP ranges, security requirements, or constraints. "
-                f"Do NOT ask for contact details, email addresses, or non-technical information. "
-                f"Do NOT provide configuration steps, commands, implementation plans, or solutions. "
-                f"Do NOT mention escalation, the network team, or handing off to anyone. "
-                f"Just ask the single most valuable technical question for the engineer."
+                f"{problem_ctx}"
+                "Ask ONE focused technical question for the network engineer — infrastructure, devices, scale, "
+                "IP ranges, security requirements, or constraints. "
+                "Do NOT provide solutions, commands, or implementation steps. "
+                "Do NOT mention escalation or handing off."
             )
-        elif session.get("flow_origin") == "planning":
+        elif flow_origin == "planning":
             timeline  = session.get("planning_timeline", "future")
-            remaining = max(0, 4 - session.get("solve_attempts", 0))
+            remaining = max(0, 4 - n)
             hint = (
                 f"This request is scheduled for: {timeline}. "
-                f"You have {remaining} exchanges to gather planning context for the network team. "
-                f"Ask ONE focused question about: technical scope, dependencies, blockers, "
-                f"business priority, success criteria, or contact person. "
-                f"Do NOT mention escalation or handing off. Just gather planning information."
+                f"You have {remaining} exchanges to gather planning context. "
+                "Ask ONE focused question about technical scope, dependencies, blockers, "
+                "business priority, or success criteria. Do NOT mention escalation."
+            )
+        elif session.get("screenshot_analysis"):
+            hint = (
+                f"The user confirmed this screenshot shows their issue: {session['screenshot_analysis'][:300]}\n\n"
+                "You already know the problem from the screenshot. Skip intake questions. "
+                "Go straight to the first specific diagnostic step based on what you can see."
             )
         else:
-            screenshot_analysis = session.get("screenshot_analysis", "")
-            if screenshot_analysis:
-                hint = (
-                    f"The user confirmed this screenshot shows their issue: {screenshot_analysis[:300]}\n\n"
-                    "You already know exactly what the problem is from the screenshot. "
-                    "Do NOT ask what the problem is, what command they ran, or what they were troubleshooting. "
-                    "Skip all intake questions. Go straight to the first specific diagnostic step "
-                    "based on what you can see in the screenshot."
-                )
-            else:
-                hint = (
-                    "No runbook found for this issue. "
-                    "First verify this is a networking issue. If it is, use your own networking expertise to troubleshoot — "
-                    "give one specific step. If it is clearly NOT a networking issue, tell the user politely and suggest "
-                    "they contact the relevant team."
-                )
+            hint = (
+                "No runbook found. Use your networking expertise — give one specific first diagnostic step. "
+                "If clearly not a networking issue, tell the user politely and redirect."
+            )
 
-    reply, domain, severity, is_networking = _call_claude(session, system, hint)
+    # For the broken flow with a runbook, trim the intake Q&A so Claude sees only
+    # the problem description — prevents it continuing the "ask questions" pattern.
+    if rag_context and flow_origin not in ("consult", "planning", "major_incident"):
+        user_msgs    = [m for m in session["messages"] if m["role"] == "user"]
+        call_session = {**session, "messages": user_msgs[-1:] if user_msgs else session["messages"]}
+    else:
+        call_session = session
+
+    try:
+        reply, domain, severity, is_networking = _call_claude(call_session, system, hint)
+    except Exception as e:
+        logger.error("[Chat] _call_claude failed in _start_ai_analysis: %s", e)
+        reply         = "I'm having trouble reaching the AI service right now. Please try again in a moment."
+        domain        = session.get("domain", "networking")
+        severity      = session.get("severity", "medium")
+        is_networking = True
 
     session["domain"]       = domain
     session["severity"]     = severity
@@ -615,7 +744,9 @@ def _start_ai_analysis(session: dict, sid: str) -> ChatMessageResponse:
             )
 
     # ── Attempt counting — Claude classifies, screenshot turn always 0 ────────
-    if session.get("flow_origin") in ("consult", "planning", "major_incident"):
+    # consult/planning: every exchange counts (they gather context, not steps)
+    # broken/major_incident: only count when reply contains a real troubleshooting step
+    if session.get("flow_origin") in ("consult", "planning"):
         if not is_screenshot_turn:
             session["solve_attempts"] += 1
     else:
@@ -634,10 +765,6 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
     # Check if resolved — include last bot question for context so short replies
     # like "yes" / "no" are judged against what was actually asked, not in isolation
     try:
-        from app.core.config import settings as _s
-        import anthropic as _a
-        _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
-
         # Get last assistant message for context
         prior_msgs    = session.get("messages", [])
         last_bot_msg  = next(
@@ -645,7 +772,7 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
             ""
         )
 
-        resp = _cl.messages.create(
+        resp = _client.messages.create(
             model      = "claude-sonnet-4-5",
             max_tokens = 10,
             messages   = [{"role": "user", "content": (
@@ -674,11 +801,13 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
 
     is_screenshot_turn = session.get("is_screenshot_turn", False)
 
-    # Only increment here for non-screenshot turns; the actual reply-based
-    # counting happens after we get the reply below
-    rag_context = session.get("rag_context", "")
+    # Retry RAG if the session had no runbook context — covers stale sessions that
+    # were already in ai_analysis when a new problem message arrives.
+    rag_context = session.get("rag_context") or _get_rag(message) or _get_rag(session.get("problem", ""))
+    if rag_context:
+        session["rag_context"] = rag_context
     has_runbook = bool(rag_context)
-    print(f"  [Major] flow_origin={session.get('flow_origin')} solve_attempts={session['solve_attempts']}")
+    logger.debug("[Major] flow_origin=%s attempts=%s rag=%s", session.get("flow_origin"), session["solve_attempts"], has_runbook)
 
     # Inject screenshot context if present
     screenshot_ctx = ""
@@ -688,13 +817,20 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
             "Use this visual context when deciding the next troubleshooting step."
         )
 
+    rag_instruction = (
+        "STRICT INSTRUCTION: Follow the runbook procedures exactly. "
+        "Ask only what the runbook requires for the current step. "
+        "Do NOT ask questions outside of the runbook steps. "
+        "When ALL runbook steps are exhausted and issue is still not resolved, end with [STEPS_EXHAUSTED]."
+    )
     if rag_context:
-        system = SYSTEM_PROMPT + (
-            f"\n\n{rag_context}"
-            f"{screenshot_ctx}\n\n"
-            "STRICT INSTRUCTION: Follow the runbook procedures exactly. "
-            "Do NOT ask questions outside of the runbook steps. "
-            "When ALL runbook steps are exhausted and issue is still not resolved, end with [STEPS_EXHAUSTED]."
+        system = (
+            SYSTEM_PROMPT
+            + "\n\nKNOWLEDGE BASE — RUNBOOK PROCEDURES:\n"
+            + rag_context
+            + "\n\n"
+            + (screenshot_ctx + "\n\n" if screenshot_ctx else "")
+            + rag_instruction
         )
     else:
         system = SYSTEM_PROMPT + (f"\n\n{screenshot_ctx}" if screenshot_ctx else "")
@@ -712,16 +848,31 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
         session["solve_attempts"] += 1
         n = session["solve_attempts"]
 
-    if n >= max_attempts and not is_consult:
-        reply = "I have tried all the troubleshooting steps I can and the issue is still not resolved. We need a network engineer to take this further."
+    is_major         = session.get("flow_origin") == "major_incident"
+    not_impacting    = session.get("customer_impacting") is False  # explicitly set False in intake
+
+    # Flow 1: major incident — auto-raise at 4 attempts
+    if is_major and n >= 4:
+        reply = "This is a major incident affecting multiple users. Raising a critical ticket now and alerting the network engineering team immediately."
         session["messages"].append({"role": "assistant", "content": reply})
-        session["flow_step"] = "escalate_ready"
+        session["domain"]                = "networking"
+        session["severity"]              = "critical"
+        session["flow_step"]             = "escalate_ready"
+        session["user_confirmed_ticket"] = True
         return _make_response(sid, session, reply, can_escalate=True)
-    elif session.get("flow_origin") == "major_incident" and n >= 4:
-        reply = "I have gathered enough details. Raising a CRITICAL ticket immediately and notifying the network engineering team."
+
+    # Flow 3: not customer-impacting — auto-raise at 4 attempts (no mid-check, no confirmation)
+    if not_impacting and n >= 4:
+        reply = "I have completed all standard troubleshooting steps. Raising a ticket now for the network engineering team to investigate further."
         session["messages"].append({"role": "assistant", "content": reply})
-        session["domain"]    = "networking"
-        session["severity"]  = "critical"
+        session["flow_step"]             = "escalate_ready"
+        session["user_confirmed_ticket"] = True
+        return _make_response(sid, session, reply, can_escalate=True)
+
+    # Flow 2: single user, customer-impacting — ask confirmation at 6 attempts
+    if n >= max_attempts and not is_consult:
+        reply = "I have exhausted all troubleshooting steps I can and the issue is still not resolved. We need a network engineer to take this further. Please confirm to raise a ticket."
+        session["messages"].append({"role": "assistant", "content": reply})
         session["flow_step"] = "escalate_ready"
         return _make_response(sid, session, reply, can_escalate=True)
     elif n >= max_attempts and is_consult:
@@ -736,7 +887,7 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
         return _make_response(sid, session, reply, can_escalate=True)
     else:
         # Mid-point check at attempt 3 (no runbook only, broken flow only)
-        if not has_runbook and n >= 3 and not session.get("mid_check_done") and not is_consult and session.get("flow_origin") not in ("planning", "major_incident"):
+        if not has_runbook and n >= 3 and not session.get("mid_check_done") and not is_consult and session.get("flow_origin") not in ("planning", "major_incident") and session.get("customer_impacting") is not False:
             session["mid_check_done"] = True
             reply = (
                 "I have tried 3 troubleshooting steps so far and the issue is still not resolved. "
@@ -747,7 +898,7 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
             return _make_response(sid, session, reply, can_escalate=False)
 
         # Runbook mid-check at step 3 — broken flow only, never consult/planning
-        if has_runbook and n >= 3 and not session.get("mid_check_done") and session.get("flow_origin") not in ("major_incident", "consult", "planning"):
+        if has_runbook and n >= 3 and not session.get("mid_check_done") and session.get("flow_origin") not in ("major_incident", "consult", "planning") and session.get("customer_impacting") is not False:
             session["mid_check_done"] = True
             reply = (
                 "I have gone through several troubleshooting steps and the issue is still not resolved. "
@@ -821,7 +972,17 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
                     "Different from anything already tried."
                 )
 
-        reply, domain, severity, is_networking = _call_claude(session, system, hint)
+        try:
+            reply, domain, severity, is_networking = _call_claude(session, system, hint)
+        except Exception as e:
+            logger.error("[Chat] _call_claude failed in _continue_ai_analysis: %s", e)
+            reply         = "I'm having trouble reaching the AI service right now. Please try again in a moment."
+            domain        = session.get("domain", "networking")
+            severity      = session.get("severity", "medium")
+            is_networking = True
+            escalate      = False
+            session["messages"].append({"role": "assistant", "content": reply})
+            return _make_response(sid, session, reply, can_escalate=False)
 
         escalate = "[STEPS_EXHAUSTED]" in reply
         reply    = reply.replace("[STEPS_EXHAUSTED]", "").strip()
@@ -839,10 +1000,13 @@ def _continue_ai_analysis(session: dict, sid: str, message: str) -> ChatMessageR
                 )
 
         # ── Attempt counting — Claude classifies, screenshot turn always 0 ────
-        if session.get("flow_origin") in ("consult", "planning", "major_incident"):
-            if not is_screenshot_turn and not is_consult:  # consult already incremented above
+        # consult: already incremented at top of function
+        # planning: every exchange counts (context gathering)
+        # broken/major_incident: only real troubleshooting steps count
+        if session.get("flow_origin") == "planning":
+            if not is_screenshot_turn:
                 session["solve_attempts"] += 1
-        else:
+        elif not is_consult:
             if _should_count_attempt(reply, is_screenshot_turn):
                 session["solve_attempts"] += 1
 
@@ -914,13 +1078,13 @@ def _handle_triage_answer(db: Session, session: dict, sid: str, answer: str) -> 
             if col and val:
                 session["triage_filters"][col] = val
                 session["asset_context"][col]  = val
-                print(f"  [Triage] Filter: {col}={val}")
+                logger.debug("[Triage] Filter set: col=%s", col)
 
         if session["triage_filters"]:
             result = progressive_match(db, session["triage_filters"], rows)
             session["asset_match"] = result.get("matched")
             candidates             = result.get("candidates", 0)
-            print(f"  [Triage] Candidates: {candidates} confident={result['confident']}")
+            logger.debug("[Triage] Candidates: %s confident=%s", candidates, result["confident"])
 
             if result["confident"]:
                 session["asset_confirmed"] = True
@@ -950,7 +1114,7 @@ def _handle_triage_answer(db: Session, session: dict, sid: str, answer: str) -> 
             return _make_response(sid, session, next_q + hint, can_escalate=False, context_gathering=True)
 
     except Exception as e:
-        print(f"  [Triage] Error: {e}")
+        logger.error("[Triage] Error: %s", e)
 
     session["triage_active"] = False
     reply = "Thanks for the details. Raising the ticket now and routing to the network engineering team."
@@ -988,52 +1152,67 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
     sid     = data.session_id or str(uuid.uuid4())
     session = _get_session(sid)
 
+    # Bind session to authenticated user — prevents user A accessing user B's session
+    if user is not None:
+        uid = str(user.id)
+        if "_user_id" not in session:
+            session["_user_id"] = uid
+        elif session["_user_id"] != uid:
+            sid     = str(uuid.uuid4())
+            session = _get_session(sid)
+            session["_user_id"] = uid
+
     msg = data.message.strip()
 
     # Store problem on first message
     if not session["problem"] and msg:
         session["problem"] = msg[:400]
 
+    # Enforce sliding-window message cap before appending — prevents per-session OOM
+    if len(session["messages"]) >= _MSG_CAP:
+        session["messages"] = session["messages"][-(  _MSG_CAP - 1):]
+
     # Append user message
     session["messages"].append({"role": "user", "content": msg})
 
     step = session["flow_step"]
-    print(f"  [Chat] Flow step={step}")
+    logger.debug("[Chat] sid=%s step=%s", sid, step)
 
     # ── FLOW ROUTING ──────────────────────────────────────────────────────────
+    # All branches assign to _result (no early returns) so _save_session can be
+    # called once here before returning.  Business logic is unchanged.
 
     if step == "broken":
         session["problem"] = msg[:400]
-        return _handle_broken(session, sid, msg)
+        _result = _handle_broken(session, sid, msg)
 
     elif step == "waiting_broken":
-        return _handle_broken(session, sid, msg)
+        _result = _handle_broken(session, sid, msg)
 
     elif step == "waiting_impacting":
-        return _handle_impacting(session, sid, msg)
+        _result = _handle_impacting(session, sid, msg)
 
     elif step == "waiting_multi_customer":
-        return _handle_multi_customer(session, sid, msg)
+        _result = _handle_multi_customer(session, sid, msg)
 
     elif step == "waiting_consult":
-        return _handle_consult(session, sid, msg)
+        _result = _handle_consult(session, sid, msg)
 
     elif step == "waiting_details":
-        return _handle_details(session, sid, msg)
+        _result = _handle_details(session, sid, msg)
 
     elif step == "waiting_deadline":
-        return _handle_deadline(session, sid, msg)
+        _result = _handle_deadline(session, sid, msg)
 
     elif step == "waiting_deadline_date":
-        # User typed their deadline — store it and ask help today
         session["deadline_date"] = msg
         session["flow_step"]     = "waiting_help_today"
         reply = "Do you need help with this today?"
         session["messages"].append({"role": "assistant", "content": reply})
-        return _make_response(sid, session, reply, can_escalate=False)
+        _result = _make_response(sid, session, reply, can_escalate=False)
 
     elif step == "waiting_help_today":
-        return _handle_help_today(session, sid, msg)
+        _result = _handle_help_today(session, sid, msg)
 
     elif step == "waiting_problem":
         session["problem"]     = msg[:400]
@@ -1041,15 +1220,11 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
         session["flow_origin"] = "broken"
         rag_context = _get_rag(msg)
         session["rag_context"] = rag_context
-        return _start_ai_analysis(session, sid)
+        _result = _start_ai_analysis(session, sid)
 
     elif step == "mid_check":
-        # Use Claude to determine intent — escalate or continue troubleshooting
         try:
-            from app.core.config import settings as _s
-            import anthropic as _a
-            _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
-            resp = _cl.messages.create(
+            resp = _client.messages.create(
                 model      = "claude-sonnet-4-5",
                 max_tokens = 5,
                 messages   = [{"role": "user", "content": (
@@ -1063,22 +1238,20 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
 
         if wants_ticket:
             session["flow_step"] = "escalate_ready"
+            session["user_confirmed_ticket"] = True
             reply = "Raising a ticket now and escalating to the network engineering team."
             session["messages"].append({"role": "assistant", "content": reply})
-            return _make_response(sid, session, reply, can_escalate=True)
+            _result = _make_response(sid, session, reply, can_escalate=True)
         else:
             session["flow_step"] = "ai_analysis"
-            return _continue_ai_analysis(session, sid, msg)
+            _result = _continue_ai_analysis(session, sid, msg)
 
     elif step == "ai_analysis":
-        return _continue_ai_analysis(session, sid, msg)
+        _result = _continue_ai_analysis(session, sid, msg)
 
     elif step == "waiting_next_sprint":
         try:
-            from app.core.config import settings as _s
-            import anthropic as _a
-            _cl = _a.Anthropic(api_key=_s.ANTHROPIC_API_KEY)
-            resp = _cl.messages.create(
+            resp = _client.messages.create(
                 model      = "claude-sonnet-4-5",
                 max_tokens = 30,
                 messages   = [{"role": "user", "content": (
@@ -1102,17 +1275,21 @@ def process_message(db: Session, user: User, data: ChatMessageRequest) -> ChatMe
         session["flow_step"]         = "ai_analysis"
         session["flow_origin"]       = "planning"
         session["solve_attempts"]    = 0
-        return _start_ai_analysis(session, sid)
+        _result = _start_ai_analysis(session, sid)
 
     elif step in ("major_incident", "next_sprint", "consult_complete", "escalate_ready"):
         reply = "Is there anything else I can help with?"
         session["messages"].append({"role": "assistant", "content": reply})
-        return _make_response(sid, session, reply)
+        _result = _make_response(sid, session, reply)
 
     else:
         session["flow_step"] = "broken"
         session["problem"]   = msg[:400]
-        return _handle_broken(session, sid, msg)
+        _result = _handle_broken(session, sid, msg)
+
+    # Persist session mutations to Redis so any worker can continue the conversation
+    _save_session(sid, session)
+    return _result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1155,7 +1332,7 @@ def analyze_screenshot(image_bytes: bytes, session_id: str, user_id: str, media_
     else:
         media_type = detected_type
 
-    print(f"  [Vision] size={len(image_bytes)} detected={detected_type} using={media_type} first={image_bytes[:8].hex()}")
+    logger.debug("[Vision] size=%d detected=%s using=%s", len(image_bytes), detected_type, media_type)
 
     # Call Claude Vision
     try:
@@ -1194,12 +1371,14 @@ def analyze_screenshot(image_bytes: bytes, session_id: str, user_id: str, media_
         # Strip markdown links before storing — prevents them leaking into future prompts
         analysis = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', analysis)
     except Exception as e:
-        analysis = f"Screenshot received (analysis unavailable: {e})"
+        logger.error("Vision analysis failed: %s", e)
+        analysis = "Screenshot received but could not be analysed."
 
     # Store in session — will be injected into next AI turn's context
     session["screenshot_analysis"] = analysis
     # Mark this as a screenshot turn so attempt counter is skipped
     session["is_screenshot_turn"]  = True
+    _save_session(session_id, session)
 
     # Generate a proper support reply from the analysis
     try:
@@ -1247,8 +1426,10 @@ def analyze_screenshot(image_bytes: bytes, session_id: str, user_id: str, media_
 def _generate_ticket_number(db: Session) -> str:
     max_t = db.query(func.max(Ticket.ticket_number)).scalar()
     if max_t:
-        try: return f"T-{str(int(max_t.split('-')[1]) + 1).zfill(4)}"
-        except: pass
+        try:
+            return f"T-{str(int(max_t.split('-')[1]) + 1).zfill(4)}"
+        except Exception:
+            pass
     return f"T-{str(db.query(Ticket).count() + 1001).zfill(4)}"
 
 
@@ -1265,7 +1446,8 @@ def _find_best_team(db: Session, domain: str, tz: str = "UTC") -> Optional[str]:
                 pytz.timezone(t.timezone or "UTC").utcoffset(now).total_seconds()
             ) / 3600
             score += 5 if diff == 0 else 3 if diff <= 3 else 1 if diff <= 6 else 0
-        except Exception: pass
+        except Exception as e:
+            logger.debug("Team tz offset calc skipped: %s", e)
         score -= t.active_ticket_count
         if score > best_score:
             best_score = score
@@ -1290,7 +1472,8 @@ def _find_best_engineer(db: Session, domain: str, tz: str = "UTC") -> Optional[s
                 pytz.timezone(usr.timezone or "UTC").utcoffset(now).total_seconds()
             ) / 3600
             score += 5 if diff == 0 else 3 if diff <= 3 else 1 if diff <= 6 else 0
-        except Exception: pass
+        except Exception as e:
+            logger.debug("Engineer tz offset calc skipped: %s", e)
         score -= eng.active_ticket_count
         if score > best_score:
             best_score = score
@@ -1303,7 +1486,8 @@ def _find_best_engineer(db: Session, domain: str, tz: str = "UTC") -> Optional[s
 # ─────────────────────────────────────────────────────────────────────────────
 
 def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> EscalateResponse:
-    session  = _sessions.get(data.session_id, {})
+    with _sessions_lock:
+        session = dict(_sessions.get(data.session_id, {}))
     severity = session.get("severity", "medium")
     asset    = session.get("asset_match")
     context  = session.get("asset_context", {})
@@ -1334,95 +1518,115 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
     if session.get("screenshot_analysis"):
         diagnosis += f"\n\nScreenshot Analysis:\n{session['screenshot_analysis']}"
 
-    domain_str  = "networking"
-    engineer_id = None
-    team_id     = None
+    domain_str   = "networking"
+    engineer_id  = None
+    team_id      = None
+    routing_path = "unassigned"   # tracks how engineer/team was ultimately found
 
     contact_email = asset.get("contact_email", "") if asset else ""
     manager_email = asset.get("manager_email", "") if asset else ""
 
-    print(f"  [Route] asset_match={asset}")
-    print(f"  [Route] contact_email={contact_email} manager_email={manager_email}")
+    logger.debug("[Route] asset_match present=%s", asset is not None)
 
     if contact_email:
         u = db.query(User).filter(User.email == contact_email).first()
         if u:
             eng = db.query(Engineer).filter(Engineer.user_id == u.id).first()
             if eng:
-                engineer_id = u.id
-                print(f"  [Route] Asset owner: {contact_email}")
+                engineer_id  = u.id
+                routing_path = "asset_owner"
+                logger.debug("[Route] Routed to asset owner engineer")
             else:
                 t = db.query(Team).filter(Team.manager_id == u.id).first()
                 if t:
-                    team_id = t.id
-                    print(f"  [Route] Manager → team: {contact_email}")
+                    team_id      = t.id
+                    routing_path = "asset_manager_team"
+                    logger.debug("[Route] Routed via manager to team")
                     members = db.query(TeamMember).filter(TeamMember.team_id == t.id).all()
                     best_eng_id, best_score = None, -999
                     for m in members:
                         eu = db.query(User).filter(User.id == m.user_id).first()
                         eo = db.query(Engineer).filter(Engineer.user_id == m.user_id).first()
                         if not eu or not eo or not eo.is_activated: continue
-                        if str(eo.availability_status) not in ("available", "AvailabilityStatus.AVAILABLE"): continue
+                        if eo.availability_status != AvailabilityStatus.AVAILABLE: continue
                         score = -eo.active_ticket_count
                         if score > best_score:
                             best_score  = score
                             best_eng_id = eu.id
                     if best_eng_id:
-                        engineer_id = best_eng_id
-                        team_id     = None
+                        engineer_id  = best_eng_id
+                        team_id      = None
+                        routing_path = "asset_manager_engineer"
 
     if not engineer_id and manager_email:
         u = db.query(User).filter(User.email == manager_email).first()
         if u:
             t = db.query(Team).filter(Team.manager_id == u.id).first()
             if t:
-                team_id = t.id
+                team_id      = t.id
+                routing_path = "manager_email_team"
 
     if not engineer_id and not team_id:
         team_id = _find_best_team(db, domain_str, user.timezone or "UTC")
-        if team_id: print(f"  [Route] Domain team fallback")
+        if team_id:
+            routing_path = "domain_team"
+            logger.debug("[Route] Domain team fallback applied")
 
     if not engineer_id and not team_id:
         engineer_id = _find_best_engineer(db, domain_str, user.timezone or "UTC")
-        if engineer_id: print(f"  [Route] Engineer fallback")
+        if engineer_id:
+            routing_path = "best_available_engineer"
+            logger.debug("[Route] Engineer direct fallback applied")
 
-    ticket = Ticket(
-        ticket_number = _generate_ticket_number(db),
-        user_id       = user.id,
-        engineer_id   = engineer_id,
-        team_id       = team_id,
-        title         = data.title,
-        description   = data.description,
-        domain        = TicketDomain.NETWORKING,
-        priority      = priority_map.get(severity, TicketPriority.MEDIUM),
-        status        = TicketStatus.OPEN,
-        steps_tried   = data.steps_tried,
-        ai_diagnosis  = diagnosis.strip() or None,
-        ai_attempted  = True,
-        user_city     = user.city,
-        user_country  = user.country,
-        user_timezone = user.timezone,
-        sla_deadline  = datetime.utcnow() + timedelta(minutes=sla_map.get(severity, 480)),
-    )
-    db.add(ticket)
+    with _ticket_creation_lock:
+        ticket = Ticket(
+            ticket_number = _generate_ticket_number(db),
+            user_id       = user.id,
+            engineer_id   = engineer_id,
+            team_id       = team_id,
+            title         = data.title,
+            description   = data.description,
+            domain        = TicketDomain.NETWORKING,
+            priority      = priority_map.get(severity, TicketPriority.MEDIUM),
+            status        = TicketStatus.OPEN,
+            steps_tried   = data.steps_tried,
+            ai_diagnosis  = diagnosis.strip() or None,
+            ai_attempted  = True,
+            user_city     = user.city,
+            user_country  = user.country,
+            user_timezone = user.timezone,
+            sla_deadline  = datetime.utcnow() + timedelta(minutes=sla_map.get(severity, 480)),
+        )
+        db.add(ticket)
 
-    if team_id:
-        t = db.query(Team).filter(Team.id == team_id).first()
-        if t: t.active_ticket_count += 1
-    if engineer_id:
-        e = db.query(Engineer).filter(Engineer.user_id == engineer_id).first()
-        if e: e.active_ticket_count += 1
+        if team_id:
+            t = db.query(Team).filter(Team.id == team_id).first()
+            if t: t.active_ticket_count += 1
+        if engineer_id:
+            e = db.query(Engineer).filter(Engineer.user_id == engineer_id).first()
+            if e: e.active_ticket_count += 1
 
-    db.commit()
-    db.refresh(ticket)
-    print(f"  [Ticket] {ticket.ticket_number} | networking | team={team_id} | eng={engineer_id}")
+        db.commit()
+        db.refresh(ticket)
+    logger.info("[Ticket] %s created | team_assigned=%s | engineer_assigned=%s",
+                ticket.ticket_number, team_id is not None, engineer_id is not None)
 
-    if data.session_id in _sessions:
-        del _sessions[data.session_id]
+    with _sessions_lock:
+        _sessions.pop(data.session_id, None)
+    _delete_session_redis(data.session_id)
 
     eng_name = eng_email = eng_city = eng_tz = eng_id_str = None
     t_name   = t_id_str = None
     r_type   = r_reason = None
+
+    _routing_reason_map = {
+        "asset_owner":              "Routed to the registered owner of this asset.",
+        "asset_manager_engineer":   "Routed to best available engineer in the asset manager's team.",
+        "asset_manager_team":       "Routed to the asset manager's team.",
+        "manager_email_team":       "Routed to the team managed by the asset manager.",
+        "domain_team":              "Routed to best matching team by domain and timezone.",
+        "best_available_engineer":  "Routed to the best available engineer by domain and timezone.",
+    }
 
     if engineer_id:
         eu = db.query(User).filter(User.id == engineer_id).first()
@@ -1434,15 +1638,15 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
             eng_tz    = eu.timezone
         if eo:
             eng_id_str = eo.engineer_id
-        r_type   = "asset_owner"
-        r_reason = "Routed to the registered owner of this asset."
+        r_type   = routing_path
+        r_reason = _routing_reason_map.get(routing_path, "Routed to engineer.")
     elif team_id:
         to = db.query(Team).filter(Team.id == team_id).first()
         if to:
             t_name   = to.name
             t_id_str = to.team_id
-        r_type   = "domain_team"
-        r_reason = "Routed to best matching team by domain and timezone."
+        r_type   = routing_path
+        r_reason = _routing_reason_map.get(routing_path, "Routed to team.")
 
     return EscalateResponse(
         ticket_id         = ticket.id,
@@ -1470,7 +1674,7 @@ def escalate_to_ticket(db: Session, user: User, data: EscalateRequest) -> Escala
 def get_user_tickets(db: Session, user: User) -> list:
     return [_ticket_resp(db, t) for t in
             db.query(Ticket).filter(Ticket.user_id == user.id)
-            .order_by(Ticket.created_at.desc()).all()]
+            .order_by(Ticket.created_at.desc()).limit(100).all()]
 
 
 def get_user_ticket(db: Session, user: User, ticket_id: str) -> UserTicketResponse:

@@ -13,10 +13,19 @@ logger = logging.getLogger(__name__)
 
 # ── Slack sessions (keyed by Slack user ID) ───────────────────────────────────
 _slack_sessions: dict = {}
+_SLACK_SESSIONS_MAX = 10_000
+
+
+def _evict_slack_sessions() -> None:
+    if len(_slack_sessions) >= _SLACK_SESSIONS_MAX:
+        evict_n = max(1, _SLACK_SESSIONS_MAX // 10)
+        for uid in list(_slack_sessions.keys())[:evict_n]:
+            _slack_sessions.pop(uid, None)
 
 
 def _get_slack_session(slack_user_id: str) -> dict:
     if slack_user_id not in _slack_sessions:
+        _evict_slack_sessions()
         _slack_sessions[slack_user_id] = {
             "session_id":    f"slack_{slack_user_id}",
             "slack_user_id": slack_user_id,
@@ -294,8 +303,7 @@ def start_slack_bot():
         handler = SocketModeHandler(app, settings.SLACK_APP_TOKEN)
 
         def run():
-            logger.info("🔌 Slack bot started — Socket Mode")
-            print("\n  🔌 Slack Bot: Connected via Socket Mode\n")
+            logger.info("Slack bot started — Socket Mode")
             handler.start()
 
         thread = threading.Thread(target=run, daemon=True)

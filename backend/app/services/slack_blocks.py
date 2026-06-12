@@ -152,12 +152,12 @@ def mid_check_runbook() -> dict:
 
 def ticket_confirm() -> dict:
     return {
-        "text":   "I've gathered enough information. Would you like me to raise a support ticket and escalate this to the network engineering team?",
+        "text":   "I have exhausted all troubleshooting steps. Would you like me to raise a support ticket and escalate this to the network engineering team?",
         "blocks": _blocks(
-            "I've gathered enough information. Would you like me to raise a support ticket and escalate this to the network engineering team?",
+            "I have exhausted all troubleshooting steps. Would you like me to raise a support ticket and escalate this to the network engineering team?",
             [
-                _btn("🎫  Yes, Raise a Ticket",          "yes", "primary"),
-                _btn("🔁  No, Keep Troubleshooting",     "no"),
+                _btn("🎫  Yes, Raise a Ticket", "yes", "primary"),
+                _btn("❌  No",                  "no"),
             ],
             "block_ticket_confirm",
         ),

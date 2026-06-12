@@ -4,10 +4,22 @@
 # Install: pip install chromadb sentence-transformers pypdf2
 
 import os
+# Must be set before sentence-transformers / transformers import.
+# TensorFlow has a broken protobuf dependency in this environment;
+# forcing the PyTorch backend avoids the crash.
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_TORCH", "1")
+
+import logging
 import re
 import uuid
 import json
+import threading
+import time
+import concurrent.futures
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 from typing import Optional, List
 
 CHROMA_DIR     = os.path.join(os.path.dirname(__file__), "..", "..", "data", "knowledge_base")
@@ -15,8 +27,18 @@ DOCS_META_PATH = os.path.join(CHROMA_DIR, "documents_meta.json")
 os.makedirs(CHROMA_DIR, exist_ok=True)
 
 # ── Singletons ────────────────────────────────────────────────────────────────
-_collection = None
-_embedder   = None
+_collection       = None
+_embedder         = None
+_anthropic_client = None
+
+
+def _get_anthropic_client():
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+        from app.core.config import settings
+        _anthropic_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return _anthropic_client
 
 
 def _get_collection():
@@ -38,6 +60,11 @@ def _get_embedder():
     global _embedder
     if _embedder is None:
         try:
+            import os
+            # TensorFlow has a broken protobuf dependency in this environment.
+            # Force transformers to use the PyTorch backend only.
+            os.environ.setdefault("USE_TF", "0")
+            os.environ.setdefault("USE_TORCH", "1")
             from sentence_transformers import SentenceTransformer
             _embedder = SentenceTransformer("all-MiniLM-L6-v2")
         except ImportError:
@@ -126,7 +153,7 @@ def _extract_docx_text(content: bytes) -> str:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
     except Exception as e:
-        print(f"  ⚠ DOCX extraction error: {e}")
+        logger.warning("[KB] DOCX extraction error: %s", e)
         return ""
 
 
@@ -221,9 +248,7 @@ def _chunk_text(text: str, chunk_size: int = 200, overlap: int = 30) -> List[str
 def _generate_summary(text: str, title: str, domain: str) -> str:
     """Generate a concise AI summary of the document for engineers."""
     try:
-        from app.core.config import settings
-        import anthropic
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        client = _get_anthropic_client()
 
         prompt = f"""You are summarizing an IT support knowledge base document for engineers.
 
@@ -249,23 +274,65 @@ Aim for 300-400 words. Be specific — include actual commands, IP ranges, thres
         )
         return resp.content[0].text.strip()
     except Exception as e:
-        print(f"  ⚠ Summary generation failed: {e}")
+        logger.warning("[KB] Summary generation failed: %s", e)
         # Fallback: use first 300 chars of cleaned text
         return text[:300].strip() + "..."
 
 
 # ── Metadata store ─────────────────────────────────────────────────────────────
+# Protects documents_meta.json from concurrent writes by request threads and
+# the background _auto_refresh_loop thread.
+_meta_lock = threading.Lock()
+
+# Serialises ChromaDB writes (add/delete) so concurrent uploads don't corrupt the index
+_collection_write_lock = threading.Lock()
+
+# RAG query result cache — keyed by query hash, value is (context_str, monotonic_timestamp)
+_rag_cache: dict        = {}
+_rag_cache_lock         = threading.Lock()
+_RAG_CACHE_TTL          = 300   # seconds — invalidate after 5 minutes
+_RAG_CACHE_MAX          = 500   # max entries before LRU eviction
+
+# Thread pool for running blocking ChromaDB calls with a hard timeout
+_chroma_executor        = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="chroma")
+_CHROMA_TIMEOUT         = 2.0   # seconds
+
+
+def _chroma_with_timeout(fn, *args, **kwargs):
+    """Run a ChromaDB call in the thread pool with a hard 2s timeout. Returns None on timeout."""
+    future = _chroma_executor.submit(fn, *args, **kwargs)
+    try:
+        return future.result(timeout=_CHROMA_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        logger.warning("[ChromaDB] Query timed out after %.1fs — returning empty context", _CHROMA_TIMEOUT)
+        return None
+    except Exception:
+        raise
+
+
+def _rag_cache_key(query: str, domain, n_results: int) -> str:
+    import hashlib
+    return hashlib.md5(f"{query}|{domain}|{n_results}".encode(), usedforsecurity=False).hexdigest()
+
+
+def _clear_rag_cache() -> None:
+    """Invalidate the entire RAG cache (called after any document add/delete)."""
+    with _rag_cache_lock:
+        _rag_cache.clear()
+
 
 def _load_meta() -> dict:
-    if os.path.exists(DOCS_META_PATH):
-        with open(DOCS_META_PATH) as f:
-            return json.load(f)
-    return {}
+    with _meta_lock:
+        if os.path.exists(DOCS_META_PATH):
+            with open(DOCS_META_PATH) as f:
+                return json.load(f)
+        return {}
 
 
 def _save_meta(meta: dict):
-    with open(DOCS_META_PATH, "w") as f:
-        json.dump(meta, f, indent=2)
+    with _meta_lock:
+        with open(DOCS_META_PATH, "w") as f:
+            json.dump(meta, f, indent=2)
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -399,6 +466,48 @@ def _fetch_notion_content(url: str) -> str:
     return full_text.strip()
 
 
+_SSRF_BLOCKED_NETS = [
+    # IPv4 private/link-local/loopback
+    "10.", "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.",
+    "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.", "172.28.",
+    "172.29.", "172.30.", "172.31.", "192.168.", "127.", "169.254.", "0.",
+    # IPv6 private
+    "::1", "fc", "fd", "fe80",
+]
+
+
+def _validate_url_for_fetch(url: str) -> None:
+    """Raise ValueError if the URL could reach internal/SSRF-sensitive targets."""
+    import urllib.parse
+    import socket
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"URL scheme '{parsed.scheme}' is not allowed. Only http and https are permitted.")
+
+    host = parsed.hostname or ""
+    if not host:
+        raise ValueError("URL has no hostname.")
+
+    # Reject raw IPs that look internal — do a quick check before DNS
+    for prefix in _SSRF_BLOCKED_NETS:
+        if host.startswith(prefix):
+            raise ValueError("URL resolves to a private/internal network address.")
+
+    # Resolve hostname and check resolved IPs
+    try:
+        results = socket.getaddrinfo(host, None)
+        for _, _, _, _, sockaddr in results:
+            ip = sockaddr[0]
+            for prefix in _SSRF_BLOCKED_NETS:
+                if ip.startswith(prefix):
+                    raise ValueError("URL resolves to a private/internal network address.")
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Could not resolve hostname '{host}': {e}")
+
+
 def fetch_url_content(url: str) -> str:
     """
     Fetch and extract clean text from any URL.
@@ -406,11 +515,24 @@ def fetch_url_content(url: str) -> str:
     All other URLs use web scraping.
     """
     import urllib.request
+    import urllib.parse
     import html as html_module
 
-    # Notion — use API
-    if "notion.so" in url or "notion.site" in url:
+    # Always validate scheme and block SSRF before any routing decision.
+    # A URL like http://169.254.169.254/?notion.so must be rejected here,
+    # not accidentally routed through the Notion path.
+    _parsed = urllib.parse.urlparse(url)
+    if _parsed.scheme not in ("http", "https"):
+        raise ValueError(f"URL scheme '{_parsed.scheme}' is not allowed.")
+
+    # Notion — use API (only if hostname is actually notion.so/notion.site)
+    _host = (_parsed.hostname or "").lower()
+    if _host == "notion.so" or _host.endswith(".notion.so") or \
+       _host == "notion.site" or _host.endswith(".notion.site"):
         return _fetch_notion_content(url)
+
+    # Block SSRF before making any network request
+    _validate_url_for_fetch(url)
 
     # Generic web scraping for all other URLs
     headers = {
@@ -427,6 +549,8 @@ def fetch_url_content(url: str) -> str:
         req  = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw_html = resp.read().decode("utf-8", errors="ignore")
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(f"Could not fetch URL: {e}")
 
@@ -478,7 +602,8 @@ def upload_url(
         for i in range(len(chunks))
     ]
 
-    collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+    with _collection_write_lock:
+        collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
 
     summary      = _generate_summary(text[:8000], title, domain)
     content_hash = _content_hash(text)
@@ -501,8 +626,9 @@ def upload_url(
         "source_type":      "url",
     }
     _save_meta(meta)
+    _clear_rag_cache()
 
-    print(f"\n  🌐 KB URL: '{title}' — {len(chunks)} chunks [{uploaded_by_role}]")
+    logger.info("[KB] URL '%s' indexed — %d chunks [%s]", title, len(chunks), uploaded_by_role)
     return {
         "success":     True,
         "doc_id":      doc_id,
@@ -538,7 +664,8 @@ def upload_document(
         for i in range(len(chunks))
     ]
 
-    collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+    with _collection_write_lock:
+        collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
 
     # Generate AI summary
     summary = _generate_summary(text[:8000], title, domain)
@@ -557,8 +684,9 @@ def upload_document(
         "created_at":       datetime.utcnow().isoformat(),
     }
     _save_meta(meta)
+    _clear_rag_cache()
 
-    print(f"\n  📚 KB Upload: '{title}' — {len(chunks)} chunks [{uploaded_by_role}]")
+    logger.info("[KB] Upload '%s' — %d chunks [%s]", title, len(chunks), uploaded_by_role)
     return {
         "success":     True,
         "doc_id":      doc_id,
@@ -624,7 +752,7 @@ def search_knowledge(
         return {"query": query, "results": hits, "total": len(hits)}
 
     except Exception as e:
-        print(f"  ⚠ KB search error: {e}")
+        logger.warning("[KB] Search error: %s", e)
         return {"query": query, "results": [], "total": 0, "error": str(e)}
 
 
@@ -646,26 +774,48 @@ def get_similar_docs_for_ticket(
 # ── RAG context for chat ──────────────────────────────────────────────────────
 
 def get_rag_context(query: str, domain: Optional[str] = None, n_results: int = 3) -> str:
+    # Check cache first
+    cache_key = _rag_cache_key(query, domain, n_results)
+    now_mono  = time.monotonic()
+    with _rag_cache_lock:
+        if cache_key in _rag_cache:
+            cached_val, cached_ts = _rag_cache[cache_key]
+            if now_mono - cached_ts < _RAG_CACHE_TTL:
+                return cached_val
+
     try:
         collection = _get_collection()
-        if collection.count() == 0:
+        # Use timeout wrapper to avoid blocking the event loop on slow ChromaDB
+        count = _chroma_with_timeout(collection.count)
+        if count is None or count == 0:
             return ""
 
         result = search_knowledge(query=query, n_results=n_results, domain=domain)
-        hits   = [r for r in result.get("results", []) if r["cosine_similarity"] >= 30]
+        # 50% cosine similarity threshold — avoids off-topic runbook matches
+        hits   = [r for r in result.get("results", []) if r["cosine_similarity"] >= 50]
+        # If no hits with domain filter, retry without — document may have a different domain label
+        if not hits and domain:
+            result = search_knowledge(query=query, n_results=n_results, domain=None)
+            hits   = [r for r in result.get("results", []) if r["cosine_similarity"] >= 50]
         if not hits:
+            logger.info("[RAG] no hits above 50%% threshold for query: %.80s", query)
             return ""
 
-        print("\n  📖 RAG Context Injected:")
-        print("  " + chr(9472)*52)
-        for i, hit in enumerate(hits[:3], 1):
-            print(f"  [{i}] {hit['title']}")
-            print(f"      File      : {hit['filename']}")
-            print(f"      Domain    : {hit['domain']}")
-            print(f"      Similarity: {hit['cosine_similarity']}%")
-        print("  " + chr(9472)*52 + "\n")
+        logger.info("[RAG] %d doc(s) matched — using:", len({h.get("doc_id") for h in hits}))
+        for i, hit in enumerate(hits[:5], 1):
+            src = hit.get("filename", "") or "(unknown)"
+            logger.info("[RAG]   [%d] title=%r  domain=%s  sim=%s%%  src=%s",
+                        i, hit["title"], hit["domain"], hit["cosine_similarity"], src)
 
-        # Return ALL chunks from EVERY matched document in full — AI reads complete runbook
+        # Return chunks from every matched document.
+        # Small docs (<= _MAX_CONTEXT_CHARS): include all chunks in order (full runbook).
+        # Large docs (> _MAX_CONTEXT_CHARS): run a targeted similarity search within the doc
+        # to get the most relevant chunks up to the cap, preserving their original order.
+        _MAX_CONTEXT_CHARS = 20_000
+
+        embedder        = _get_embedder()
+        query_embedding = embedder.encode([query]).tolist()
+
         seen_docs = set()
         context   = "\n\n--- Knowledge Base ---\n"
         for hit in hits:
@@ -673,23 +823,70 @@ def get_rag_context(query: str, domain: Optional[str] = None, n_results: int = 3
             if doc_id and doc_id not in seen_docs:
                 seen_docs.add(doc_id)
                 try:
-                    all_chunks = collection.get(
+                    all_chunks = _chroma_with_timeout(
+                        collection.get,
                         where={"doc_id": doc_id},
-                        include=["documents", "metadatas"]
+                        include=["documents", "metadatas"],
                     )
+                    if all_chunks is None:
+                        context += f"\n[{hit['title']}]\n{hit['content']}\n\n"
+                        continue
                     if all_chunks and all_chunks["documents"]:
-                        context += f"\n[{hit['title']}]\n"
-                        # Sort by chunk_index so document is read in order
                         chunks_with_idx = list(zip(
                             all_chunks["documents"],
-                            all_chunks["metadatas"]
+                            all_chunks["metadatas"],
                         ))
                         chunks_with_idx.sort(key=lambda x: x[1].get("chunk_index", 0))
-                        for doc_text, _ in chunks_with_idx:
-                            context += doc_text + "\n\n"
+                        doc_text_full = "\n\n".join(t for t, _ in chunks_with_idx)
+
+                        if len(doc_text_full) <= _MAX_CONTEXT_CHARS:
+                            context += f"\n[{hit['title']}]\n{doc_text_full}\n\n"
+                        else:
+                            # Large doc: similarity-search within this doc for the best chunks
+                            doc_count = len(all_chunks["documents"])
+                            try:
+                                inner = _chroma_with_timeout(
+                                    collection.query,
+                                    query_embeddings=query_embedding,
+                                    n_results=min(20, doc_count),
+                                    where={"doc_id": doc_id},
+                                    include=["documents", "metadatas", "distances"],
+                                )
+                            except Exception:
+                                inner = None
+
+                            if inner and inner["documents"] and inner["documents"][0]:
+                                # Keep chunks in their original document order, up to cap
+                                inner_by_idx = sorted(
+                                    zip(inner["documents"][0], inner["metadatas"][0]),
+                                    key=lambda x: x[1].get("chunk_index", 0),
+                                )
+                                selected, total_len = [], 0
+                                for chunk_text, _ in inner_by_idx:
+                                    if total_len + len(chunk_text) > _MAX_CONTEXT_CHARS:
+                                        break
+                                    selected.append(chunk_text)
+                                    total_len += len(chunk_text)
+                                context += f"\n[{hit['title']}]\n" + "\n\n".join(selected) + "\n\n"
+                                logger.info(
+                                    "[RAG] doc %s: %d chunks total → top %d by similarity (%d chars)",
+                                    doc_id[:8], doc_count, len(selected), total_len,
+                                )
+                            else:
+                                context += f"\n[{hit['title']}]\n{doc_text_full[:_MAX_CONTEXT_CHARS]}\n\n"
                 except Exception:
                     context += f"\n[{hit['title']}]\n{hit['content']}\n\n"
         context += "\n--- End Knowledge Base ---\n"
+
+        # Store in cache
+        with _rag_cache_lock:
+            if len(_rag_cache) >= _RAG_CACHE_MAX:
+                # Evict oldest 10%
+                sorted_items = sorted(_rag_cache.items(), key=lambda kv: kv[1][1])
+                for k, _ in sorted_items[:max(1, _RAG_CACHE_MAX // 10)]:
+                    _rag_cache.pop(k, None)
+            _rag_cache[cache_key] = (context, time.monotonic())
+
         return context
 
     except Exception:
@@ -703,7 +900,7 @@ import threading
 
 def _content_hash(text: str) -> str:
     """Generate hash of content to detect changes."""
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+    return hashlib.md5(text.encode("utf-8"), usedforsecurity=False).hexdigest()
 
 
 def _refresh_url_document(doc_id: str, meta_entry: dict) -> bool:
@@ -718,7 +915,7 @@ def _refresh_url_document(doc_id: str, meta_entry: dict) -> bool:
     try:
         text = fetch_url_content(url)
         if not text.strip():
-            print(f"  ⚠ Auto-refresh: empty content from {url}")
+            logger.warning("[AutoRefresh] Empty content from URL (doc_id=%s)", doc_id)
             return False
 
         new_hash = _content_hash(text)
@@ -728,29 +925,30 @@ def _refresh_url_document(doc_id: str, meta_entry: dict) -> bool:
             return False  # No change
 
         # Content changed — re-index
-        print(f"  🔄 Auto-refresh: '{meta_entry['title']}' content changed — re-indexing")
+        logger.info("[AutoRefresh] '%s' content changed — re-indexing", meta_entry["title"])
 
         chunks     = _chunk_text(text)
         embedder   = _get_embedder()
         embeddings = embedder.encode(chunks).tolist()
         collection = _get_collection()
 
-        # Delete old chunks
-        try:
-            old_results = collection.get(where={"doc_id": doc_id})
-            if old_results["ids"]:
-                collection.delete(ids=old_results["ids"])
-        except Exception:
-            pass
+        # Delete old chunks and add new ones atomically under write lock
+        with _collection_write_lock:
+            try:
+                old_results = collection.get(where={"doc_id": doc_id})
+                if old_results["ids"]:
+                    collection.delete(ids=old_results["ids"])
+            except Exception:
+                pass
 
-        # Add new chunks
-        ids       = [f"{doc_id}_{i}" for i in range(len(chunks))]
-        metadatas = [
-            {"doc_id": doc_id, "domain": meta_entry["domain"],
-             "title": meta_entry["title"], "chunk_index": i, "source_url": url}
-            for i in range(len(chunks))
-        ]
-        collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+            ids       = [f"{doc_id}_{i}" for i in range(len(chunks))]
+            metadatas = [
+                {"doc_id": doc_id, "domain": meta_entry["domain"],
+                 "title": meta_entry["title"], "chunk_index": i, "source_url": url}
+                for i in range(len(chunks))
+            ]
+            collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+        _clear_rag_cache()
 
         # Regenerate summary
         summary = _generate_summary(text[:8000], meta_entry["title"], meta_entry["domain"])
@@ -764,43 +962,59 @@ def _refresh_url_document(doc_id: str, meta_entry: dict) -> bool:
             meta[doc_id]["last_refreshed"] = datetime.utcnow().isoformat()
             _save_meta(meta)
 
-        print(f"  ✅ Auto-refresh: '{meta_entry['title']}' — {len(chunks)} chunks re-indexed")
+        logger.info("[AutoRefresh] '%s' — %d chunks re-indexed", meta_entry["title"], len(chunks))
         return True
 
     except Exception as e:
-        print(f"  ⚠ Auto-refresh error for '{meta_entry.get('title')}': {e}")
+        logger.warning("[AutoRefresh] Error for '%s': %s", meta_entry.get("title"), e)
         return False
 
 
+_refresh_failure_counts: dict = {}
+_REFRESH_BACKOFF_STEPS  = [120, 300, 900, 3600]  # 2m, 5m, 15m, 1h
+
+
 def _auto_refresh_loop():
-    """Background thread — checks all URL documents for changes every 2 minutes."""
+    """Background thread — checks all URL documents for changes, with per-URL failure backoff."""
     import time
     while True:
-        time.sleep(120)  # Check every 2 minutes
+        time.sleep(120)
         try:
             meta = _load_meta()
             url_docs = {
                 doc_id: entry for doc_id, entry in meta.items()
                 if entry.get("source_type") == "url" or
-                   (entry.get("filename", "").startswith("http"))
+                   entry.get("filename", "").startswith("http")
             }
             if not url_docs:
                 continue
-            print(f"  🔄 Auto-refresh: checking {len(url_docs)} URL documents for changes")
+            logger.debug("[AutoRefresh] Checking %d URL documents for changes", len(url_docs))
             updated = 0
             for doc_id, entry in url_docs.items():
-                if _refresh_url_document(doc_id, entry):
-                    updated += 1
-            print(f"  🔄 Auto-refresh complete: {updated}/{len(url_docs)} documents updated")
+                fail_count = _refresh_failure_counts.get(doc_id, 0)
+                backoff    = _REFRESH_BACKOFF_STEPS[min(fail_count, len(_REFRESH_BACKOFF_STEPS) - 1)]
+                last_tried = entry.get("_last_refresh_attempt", 0)
+                if time.time() - last_tried < backoff:
+                    continue
+                try:
+                    refreshed = _refresh_url_document(doc_id, entry)
+                    if refreshed:
+                        updated += 1
+                    _refresh_failure_counts[doc_id] = 0
+                except Exception:
+                    _refresh_failure_counts[doc_id] = fail_count + 1
+                    logger.warning("[AutoRefresh] Failure #%d for doc %s — next retry in %ds",
+                                   _refresh_failure_counts[doc_id], doc_id, backoff)
+            logger.debug("[AutoRefresh] Complete: %d/%d documents updated", updated, len(url_docs))
         except Exception as e:
-            print(f"  ⚠ Auto-refresh loop error: {e}")
+            logger.error("[AutoRefresh] Loop error: %s", e)
 
 
 def start_url_refresh_scheduler():
     """Start the background URL refresh scheduler."""
     thread = threading.Thread(target=_auto_refresh_loop, daemon=True)
     thread.start()
-    print("  ⏰ URL auto-refresh scheduler started (checks every 2 minutes for changes)")
+    logger.info("[AutoRefresh] URL refresh scheduler started")
 
 
 # ── List / Delete ─────────────────────────────────────────────────────────────
@@ -819,12 +1033,14 @@ def delete_document(doc_id: str) -> bool:
         return False
     try:
         collection = _get_collection()
-        results    = collection.get(where={"doc_id": doc_id})
-        if results["ids"]:
-            collection.delete(ids=results["ids"])
+        with _collection_write_lock:
+            results = collection.get(where={"doc_id": doc_id})
+            if results["ids"]:
+                collection.delete(ids=results["ids"])
     except Exception as e:
-        print(f"  ⚠ KB delete error: {e}")
+        logger.warning("[KB] Delete error for %s: %s", doc_id, e)
     del meta[doc_id]
     _save_meta(meta)
-    print(f"\n  🗑 KB: deleted {doc_id}")
+    _clear_rag_cache()
+    logger.info("[KB] Deleted doc_id=%s", doc_id)
     return True
